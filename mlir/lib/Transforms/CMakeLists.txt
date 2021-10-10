@@ -10,6 +10,7 @@ add_mlir_library(MLIRTransforms
   LocationSnapshot.cpp
   LoopCoalescing.cpp
   LoopFusion.cpp
+  MyPass.cpp
   LoopInvariantCodeMotion.cpp
   NormalizeMemRefs.cpp
   OpStats.cpp

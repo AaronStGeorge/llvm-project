@@ -90,6 +90,8 @@ createLoopFusionPass(unsigned fastMemorySpace = 0,
 /// instructions out of the loop.
 std::unique_ptr<Pass> createLoopInvariantCodeMotionPass();
 
+std::unique_ptr<Pass> createMyPass();
+
 /// Creates a pass to pipeline explicit movement of data across levels of the
 /// memory hierarchy.
 std::unique_ptr<OperationPass<FuncOp>> createPipelineDataTransferPass();

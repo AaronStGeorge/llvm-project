@@ -132,6 +132,7 @@ int dumpMLIR() {
     // the operations.
     mlir::OpPassManager &optPM = pm.nest<mlir::FuncOp>();
     optPM.addPass(mlir::toy::createShapeInferencePass());
+    optPM.addPass(mlir::createMyPass()); // HOPE!
     optPM.addPass(mlir::createCanonicalizerPass());
     optPM.addPass(mlir::createCSEPass());
   }
