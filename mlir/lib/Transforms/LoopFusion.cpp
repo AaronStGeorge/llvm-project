@@ -572,7 +572,28 @@ public:
     }
   }
 
+  void printGViz(raw_ostream &os) const {
+    os << "digraph G {" << "\n";
+    for (const auto &idAndNode : nodes) {
+      auto it = inEdges.find(idAndNode.first);
+      it = outEdges.find(idAndNode.first);
+      if (it != outEdges.end()) {
+        for (const auto &e : it->second)
+          os << idAndNode.first << " -> " << e.id << "\n";
+      }
+    }
+    os << "}" << "\n";
+  }
+
   void print(raw_ostream &os) const {
+    for (unsigned i=0; i < nodes.size(); i ++) {
+      for (const auto &pair : nodes) {
+        if (pair.first == i) {
+          os << "Node: " << pair.first << "\n";
+          pair.getSecond().op->dump();
+        }
+      }
+    }
     os << "\nMemRefDependenceGraph\n";
     os << "\nNodes:\n";
     for (const auto &idAndNode : nodes) {
