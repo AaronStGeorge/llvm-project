@@ -578,8 +578,9 @@ public:
       auto it = inEdges.find(idAndNode.first);
       it = outEdges.find(idAndNode.first);
       if (it != outEdges.end()) {
-        for (const auto &e : it->second)
-          os << idAndNode.first << " -> " << e.id << "\n";
+        for (const auto &e : it->second){
+          os << idAndNode.first << " -> " << e.id << " [label =\"" << e.value <<"\"];"<< "\n";
+        }
       }
     }
     os << "}" << "\n";
@@ -611,6 +612,7 @@ public:
     }
   }
   void dump() const { print(llvm::errs()); }
+  void dumpGViz() const { printGViz(llvm::errs()); }
 };
 
 /// Returns true if node 'srcId' can be removed after fusing it with node
@@ -1456,6 +1458,7 @@ public:
       // Skip if 'dstNode' is not a loop nest.
       if (!isa<AffineForOp>(dstNode->op))
         continue;
+      // TODO: how can a loop nest return values? What Does that even mean.
       // Skip if 'dstNode' is a loop nest returning values.
       // TODO: support loop nests that return values.
       if (dstNode->op->getNumResults() > 0)
@@ -2000,6 +2003,8 @@ void LoopFusion::runOnFunction() {
   if (!g.init(getFunction()))
     return;
 
+  // TODO: fastMemorySpace vs fastMemorySpaceOpt is an Option vs Optional...
+  //  Don't really know what the difference is there.
   Optional<unsigned> fastMemorySpaceOpt;
   if (fastMemorySpace.hasValue())
     fastMemorySpaceOpt = fastMemorySpace;

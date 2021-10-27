@@ -22,5 +22,12 @@ std::unique_ptr<Pass> mlir::createMyPass() {
 
 void MyPass::runOnFunction() {
     LLVM_DEBUG(llvm::dbgs() << "TACO: Hello from my pass!\n");
+    FuncOp f = getOperation();
+
+    auto a = [](Operation *inst) {
+        LLVM_DEBUG(llvm::dbgs() << "TACO: Hello from my pass!\n");
+    };
+
+    f->walk(a);
 }
 
