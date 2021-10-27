@@ -1411,8 +1411,7 @@ public:
     // metrics (e.g. arithmetic intensity/flops-to-bytes ratio).
     worklist.clear();
     for (auto &idAndNode : mdg->nodes) {
-      const Node &node = idAndNode.second;
-      worklist.push_back(node.id);
+      worklist.push_back(idAndNode.first);
     }
   }
   /// Run only sibling fusion on the `mdg`.
