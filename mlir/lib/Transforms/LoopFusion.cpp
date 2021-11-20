@@ -586,7 +586,7 @@ public:
     os << "}" << "\n";
   }
 
-  void print(raw_ostream &os) const {
+  void printNodesInOrder(raw_ostream &os) const {
     for (unsigned i=0; i < nodes.size(); i ++) {
       for (const auto &pair : nodes) {
         if (pair.first == i) {
@@ -595,6 +595,9 @@ public:
         }
       }
     }
+  }
+
+  void print(raw_ostream &os) const {
     os << "\nMemRefDependenceGraph\n";
     os << "\nNodes:\n";
     for (const auto &idAndNode : nodes) {
@@ -613,6 +616,7 @@ public:
   }
   void dump() const { print(llvm::errs()); }
   void dumpGViz() const { printGViz(llvm::errs()); }
+  void dumpNodesInOrder() const { printNodesInOrder(llvm::errs()); }
 };
 
 /// Returns true if node 'srcId' can be removed after fusing it with node
@@ -674,12 +678,16 @@ static bool canRemoveSrcNodeAfterFusion(
   return true;
 }
 
+/// TODO: this returns a (potentially empty) list of AffineForOps parent to this
+/// op in the mdg that contain a store into the same memref that dstID contains
+/// a load.
+
 /// Returns in 'srcIdCandidates' the producer fusion candidates for consumer
 /// 'dstId'. Candidates are sorted by node id order. This order corresponds to
 /// the program order when the 'mdg' is created. However, program order is not
 /// guaranteed and must not be required by the client. Program order won't be
 /// held if the 'mdg' is reused from a previous fusion step or if the node
-/// creation order changes in the future to support more advance cases.
+/// creation order changes in the future to support more advanced cases.
 // TODO: Move this to a loop fusion utility once 'mdg' is also moved.
 static void getProducerCandidates(unsigned dstId, MemRefDependenceGraph *mdg,
                                   SmallVectorImpl<unsigned> &srcIdCandidates) {
@@ -709,6 +717,7 @@ static void getProducerCandidates(unsigned dstId, MemRefDependenceGraph *mdg,
   }
 
   std::sort(srcIdCandidates.begin(), srcIdCandidates.end());
+  // TODO: what the fuck does this shit below do?
   srcIdCandidates.erase(
       std::unique(srcIdCandidates.begin(), srcIdCandidates.end()),
       srcIdCandidates.end());
@@ -1435,6 +1444,7 @@ public:
   // *) Second pass fuses sibling nodes which share no dependence edges.
   // *) Third pass fuses any remaining producer nodes into their users.
   void runGreedyFusion() {
+    // TODO: AARON: why the maxSrcUserCount change between first and second run?
     // TODO: Run this repeatedly until a fixed-point is reached.
     fuseProducerConsumerNodes(/*maxSrcUserCount=*/1);
     fuseSiblingNodes();
@@ -1498,10 +1508,24 @@ public:
           if (isa<AffineForOp>(srcNode->op) && srcNode->op->getNumResults() > 0)
             continue;
 
+          // The directionality has already been established at this point. We
+          // are looking at a memref which srcNode (the producer) stores to and
+          // dstNode (the consumer) writes from. The goal here is to remove the
+          // need for the memref. That's why this isn't a tuple or something
+          // with a src and a dest, there is only one way the "arrow" could be
+          // pointing.
           DenseSet<Value> producerConsumerMemrefs;
           gatherProducerConsumerMemrefs(srcId, dstId, mdg,
                                         producerConsumerMemrefs);
 
+          // AARON: Debug stuff I added to see what was in
+          // producerConsumerMemrefs
+          std::for_each(producerConsumerMemrefs.begin(), producerConsumerMemrefs.end(), [&](const Value& item){
+            item.getDefiningOp()->dump();
+          });
+
+
+          // AARON: can skip this stuff
           // Skip if 'srcNode' out edge count on any memref is greater than
           // 'maxSrcUserCount'.
           if (any_of(producerConsumerMemrefs, [&](Value memref) {
@@ -1509,6 +1533,10 @@ public:
                        maxSrcUserCount;
               }))
             continue;
+
+          // AARON: I think you should probably just skip this check for your
+          // pass, it won't be a valid pass without this check but it will work
+          // on the input that you're actually going to give it.
 
           // Gather memrefs in 'srcNode' that are written and escape to the
           // function (e.g., memref function arguments, returned memrefs,

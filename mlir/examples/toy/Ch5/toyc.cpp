@@ -147,7 +147,7 @@ int dumpMLIR() {
 
     // Add optimizations if enabled.
     if (enableOpt) {
-      optPM.addPass(mlir::createLoopFusionPass());
+      optPM.addPass(mlir::createLoopFusionPass(0,0,false, mlir::FusionMode::ProducerConsumer));
       optPM.addPass(mlir::createAffineScalarReplacementPass());
     }
   }
