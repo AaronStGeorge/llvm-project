@@ -1534,9 +1534,10 @@ public:
               }))
             continue;
 
-          // AARON: I think you should probably just skip this check for your
-          // pass, it won't be a valid pass without this check but it will work
-          // on the input that you're actually going to give it.
+          // AARON: I think you should probably just skip the escaping memrefs
+          // check for your pass, it won't be a valid pass without this check
+          // but it will work on the input that you're actually going to give
+          // it.
 
           // Gather memrefs in 'srcNode' that are written and escape to the
           // function (e.g., memref function arguments, returned memrefs,
