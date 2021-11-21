@@ -556,7 +556,7 @@ def StripDebugInfo : Pass<"strip-debuginfo"> {
   let constructor = "mlir::createStripDebugInfoPass()";
 }
 
-def MyPass : FunctionPass<"my"> {
+def MyPass : FunctionPass<"my-pass"> {
     let summary = "prints some debug stuff";
     let description = [{
         This pass prints some debug stuff

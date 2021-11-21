@@ -16,7 +16,7 @@ namespace {
     };
 } // end anonymous namespace
 
-std::unique_ptr<Pass> mlir::createMyPass() {
+std::unique_ptr<OperationPass<FuncOp>> mlir::createMyPass() {
     return std::make_unique<MyPass>();
 }
 

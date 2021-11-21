@@ -1520,9 +1520,10 @@ public:
 
           // AARON: Debug stuff I added to see what was in
           // producerConsumerMemrefs
-          std::for_each(producerConsumerMemrefs.begin(), producerConsumerMemrefs.end(), [&](const Value& item){
-            item.getDefiningOp()->dump();
-          });
+          // AARON: this was causing an asan issue, commented out for now
+//          std::for_each(producerConsumerMemrefs.begin(), producerConsumerMemrefs.end(), [&](const Value& item){
+//            item.getDefiningOp()->dump();
+//          });
 
 
           // AARON: can skip this stuff
