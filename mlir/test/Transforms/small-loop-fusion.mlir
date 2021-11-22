@@ -19,5 +19,25 @@ func @should_fuse_raw_dep_for_locality() {
   return
 }
 
+// -----
 
-// AARON: write test where there is a data dependence and the loops can't be fused
+// CHECK-LABEL: func @should_not_fuse_reverse_loop() {
+func @should_not_fuse_reverse_loop() {
+  %m = memref.alloc() : memref<10xf32>
+  %cf7 = constant 7.0 : f32
+
+  affine.for %i0 = 10 to 0 {
+    affine.store %cf7, %m[%i0] : memref<10xf32>
+  }
+  affine.for %i1 = 0 to 10 {
+    %v0 = affine.load %m[%i1] : memref<10xf32>
+  }
+  // CHECK:      affine.for %{{.*}} = 10 to 0 {
+  // CHECK-NEXT:   affine.store %{{.*}}, %{{.*}}[%{{.*}}] : memref<10xf32>
+  // CHECK-NEXT: }
+  // CHECK-NEXT: affine.for %{{.*}} = 0 to 10 {
+  // CHECK-NEXT:   affine.load %{{.*}}[%{{.*}}] : memref<10xf32>
+  // CHECK-NEXT: }
+  // CHECK-NEXT: return
+  return
+}
