@@ -382,17 +382,6 @@ static void getProducerCandidates(unsigned dstId, MemRefDependenceGraph *mdg,
       srcIdCandidates.end());
 }
 
-/// Returns in 'producerConsumerMemrefs' the memrefs involved in a
-/// producer-consumer dependence between 'srcId' and 'dstId'.
-static void
-gatherProducerConsumerMemrefs(unsigned srcId, unsigned dstId,
-                              MemRefDependenceGraph *mdg,
-                              DenseSet<Value> &producerConsumerMemrefs) {
-  auto *dstNode = mdg->getNode(dstId);
-  auto *srcNode = mdg->getNode(srcId);
-  gatherProducerConsumerMemrefs(srcNode->stores, dstNode->loads,
-                                producerConsumerMemrefs);
-}
 
 } // end anonymous namespace
 
@@ -522,127 +511,6 @@ bool MemRefDependenceGraph::init(FuncOp f) {
     }
   }
   return true;
-}
-
-//  TODO: improve/complete this when we have target data.
-static unsigned getMemRefEltSizeInBytes(MemRefType memRefType) {
-  auto elementType = memRefType.getElementType();
-
-  unsigned sizeInBits;
-  if (elementType.isIntOrFloat()) {
-    sizeInBits = elementType.getIntOrFloatBitWidth();
-  } else {
-    auto vectorType = elementType.cast<VectorType>();
-    sizeInBits =
-        vectorType.getElementTypeBitWidth() * vectorType.getNumElements();
-  }
-  return llvm::divideCeil(sizeInBits, 8);
-}
-
-// Creates and returns a private (single-user) memref for fused loop rooted
-// at 'forOp', with (potentially reduced) memref size based on the
-// MemRefRegion written to by 'srcStoreOpInst' at depth 'dstLoopDepth'.
-// TODO: consider refactoring the common code from generateDma and
-// this one.
-static Value createPrivateMemRef(AffineForOp forOp, Operation *srcStoreOpInst,
-                                 unsigned dstLoopDepth,
-                                 Optional<unsigned> fastMemorySpace,
-                                 uint64_t localBufSizeThreshold) {
-  auto *forInst = forOp.getOperation();
-
-  // Create builder to insert alloc op just before 'forOp'.
-  OpBuilder b(forInst);
-  // Builder to create constants at the top level.
-  OpBuilder top(forInst->getParentOfType<FuncOp>().getBody());
-  // Create new memref type based on slice bounds.
-  auto oldMemRef = cast<AffineWriteOpInterface>(srcStoreOpInst).getMemRef();
-  auto oldMemRefType = oldMemRef.getType().cast<MemRefType>();
-  unsigned rank = oldMemRefType.getRank();
-
-  // Compute MemRefRegion for 'srcStoreOpInst' at depth 'dstLoopDepth'.
-  MemRefRegion region(srcStoreOpInst->getLoc());
-  bool validRegion = succeeded(region.compute(srcStoreOpInst, dstLoopDepth));
-  (void)validRegion;
-  assert(validRegion && "unexpected memref region failure");
-  SmallVector<int64_t, 4> newShape;
-  std::vector<SmallVector<int64_t, 4>> lbs;
-  SmallVector<int64_t, 8> lbDivisors;
-  lbs.reserve(rank);
-  // Query 'region' for 'newShape' and lower bounds of MemRefRegion accessed
-  // by 'srcStoreOpInst' at depth 'dstLoopDepth'.
-  Optional<int64_t> numElements =
-      region.getConstantBoundingSizeAndShape(&newShape, &lbs, &lbDivisors);
-  assert(numElements.hasValue() &&
-         "non-constant number of elts in local buffer");
-
-  const FlatAffineValueConstraints *cst = region.getConstraints();
-  // 'outerIVs' holds the values that this memory region is symbolic/parametric
-  // on; this would correspond to loop IVs surrounding the level at which the
-  // slice is being materialized.
-  SmallVector<Value, 8> outerIVs;
-  cst->getValues(rank, cst->getNumIds(), &outerIVs);
-
-  // Build 'rank' AffineExprs from MemRefRegion 'lbs'
-  SmallVector<AffineExpr, 4> offsets;
-  offsets.reserve(rank);
-  for (unsigned d = 0; d < rank; ++d) {
-    assert(lbs[d].size() == cst->getNumCols() - rank && "incorrect bound size");
-
-    AffineExpr offset = top.getAffineConstantExpr(0);
-    for (unsigned j = 0, e = cst->getNumCols() - rank - 1; j < e; j++) {
-      offset = offset + lbs[d][j] * top.getAffineDimExpr(j);
-    }
-    assert(lbDivisors[d] > 0);
-    offset =
-        (offset + lbs[d][cst->getNumCols() - 1 - rank]).floorDiv(lbDivisors[d]);
-    offsets.push_back(offset);
-  }
-
-  // Create 'newMemRefType' using 'newShape' from MemRefRegion accessed
-  // by 'srcStoreOpInst'.
-  uint64_t bufSize =
-      getMemRefEltSizeInBytes(oldMemRefType) * numElements.getValue();
-  unsigned newMemSpace;
-  if (bufSize <= localBufSizeThreshold && fastMemorySpace.hasValue()) {
-    newMemSpace = fastMemorySpace.getValue();
-  } else {
-    newMemSpace = oldMemRefType.getMemorySpaceAsInt();
-  }
-  auto newMemRefType = MemRefType::get(newShape, oldMemRefType.getElementType(),
-                                       {}, newMemSpace);
-
-  // Create new private memref for fused loop 'forOp'. 'newShape' is always
-  // a constant shape.
-  // TODO: Create/move alloc ops for private memrefs closer to their
-  // consumer loop nests to reduce their live range. Currently they are added
-  // at the beginning of the function, because loop nests can be reordered
-  // during the fusion pass.
-  Value newMemRef = top.create<memref::AllocOp>(forOp.getLoc(), newMemRefType);
-
-  // Build an AffineMap to remap access functions based on lower bound offsets.
-  SmallVector<AffineExpr, 4> remapExprs;
-  remapExprs.reserve(rank);
-  for (unsigned i = 0; i < rank; i++) {
-    auto dimExpr = b.getAffineDimExpr(outerIVs.size() + i);
-
-    auto remapExpr =
-        simplifyAffineExpr(dimExpr - offsets[i], outerIVs.size() + rank, 0);
-    remapExprs.push_back(remapExpr);
-  }
-
-  auto indexRemap =
-      AffineMap::get(outerIVs.size() + rank, 0, remapExprs, forOp.getContext());
-
-  // Replace all users of 'oldMemRef' with 'newMemRef'.
-  LogicalResult res =
-      replaceAllMemRefUsesWith(oldMemRef, newMemRef, {}, indexRemap,
-                               /*extraOperands=*/outerIVs,
-                               /*symbolOperands=*/{},
-                               /*domInstFilter=*/&*forOp.getBody()->begin());
-  assert(succeeded(res) &&
-         "replaceAllMemrefUsesWith should always succeed here");
-  (void)res;
-  return newMemRef;
 }
 
 namespace {
@@ -777,26 +645,9 @@ public:
           LLVM_DEBUG(llvm::dbgs() << "Evaluating src loop " << srcId
                                   << " for dst loop " << dstId << "\n");
 
-          // The directionality has already been established at this point. We
-          // are looking at a memref which srcNode (the producer) stores to and
-          // dstNode (the consumer) writes from. The goal here is to remove the
-          // need for the memref. That's why this isn't a tuple or something
-          // with a src and a dest, there is only one way the "arrow" could be
-          // pointing.
-          DenseSet<Value> producerConsumerMemrefs;
-          gatherProducerConsumerMemrefs(srcId, dstId, mdg,
-                                        producerConsumerMemrefs);
-
-          // AARON: Debug stuff I added to see what was in
-          // producerConsumerMemrefs
-          std::for_each(producerConsumerMemrefs.begin(),
-          producerConsumerMemrefs.end(), [](const Value& item){
-            item.getDefiningOp()->dump();
-          });
-
-          // AARON: We are assuming that it's legal to fuse the first loop into
-          // the second
-          Operation *fusedLoopInsPoint = dstNode->op;
+          // AARON: We are assuming that there are no affine uses of variables
+          // between the loops. This can make it illegal to fuse the first loop
+          // into the second.
 
           // TODO: AARON: Be able to articulate what "loop depth" is in this circumstance
           ComputationSliceState a = ComputationSliceState();
@@ -810,13 +661,6 @@ public:
                            << "Can't fuse: not legal\n");
             continue;
           }
-          unsigned bestDstLoopDepth = 1;
-
-          DenseSet<Value> privateMemrefs;
-          for (Value memref : producerConsumerMemrefs) {
-            // Create a private version of this memref.
-            privateMemrefs.insert(memref);
-          }
 
           // Fuse computation slice of 'srcLoopNest' into 'dstLoopNest'.
           fuseLoops(srcAffineForOp, dstAffineForOp, bestSlice);
@@ -824,56 +668,7 @@ public:
 
           LLVM_DEBUG(llvm::dbgs()
                      << "Fused src loop " << srcId << " into dst loop " << dstId
-                     << " at depth " << bestDstLoopDepth << ":\n"
-                     << dstAffineForOp << "\n");
-
-          // Move 'dstAffineForOp' before 'insertPointInst' if needed.
-          if (fusedLoopInsPoint != dstAffineForOp.getOperation())
-            dstAffineForOp.getOperation()->moveBefore(fusedLoopInsPoint);
-
-          // Create private memrefs.
-          if (!privateMemrefs.empty()) {
-            // Gather stores for all the private-to-be memrefs.
-            DenseMap<Value, SmallVector<Operation *, 4>> privateMemRefToStores;
-            dstAffineForOp.walk([&](AffineWriteOpInterface storeOp) {
-              Value storeMemRef = storeOp.getMemRef();
-              if (privateMemrefs.count(storeMemRef) > 0)
-                privateMemRefToStores[storeMemRef].push_back(
-                    storeOp.getOperation());
-            });
-
-            // Replace original memrefs with private memrefs. Note that all the
-            // loads and stores on these memrefs will be replaced with a new
-            // loads and stores. Any reference to the original ones becomes
-            // invalid after this point.
-            for (auto &memrefToStoresPair : privateMemRefToStores) {
-              // TODO: Use union of memref write regions to compute
-              // private memref footprint.
-              SmallVector<Operation *, 4> &storesForMemref =
-                  memrefToStoresPair.second;
-              Value newMemRef = createPrivateMemRef(
-                  dstAffineForOp, storesForMemref[0], bestDstLoopDepth,
-                  fastMemorySpace, localBufSizeThreshold);
-              // Create new node in dependence graph for 'newMemRef' alloc op.
-              unsigned newMemRefNodeId =
-                  mdg->addNode(newMemRef.getDefiningOp());
-              // Add edge from 'newMemRef' node to dstNode.
-              mdg->addEdge(newMemRefNodeId, dstId, newMemRef);
-            }
-            // One or more entries for 'newMemRef' alloc op are inserted into
-            // the DenseMap mdg->nodes. Since an insertion may cause DenseMap to
-            // reallocate, update dstNode.
-            dstNode = mdg->getNode(dstId);
-          }
-
-          // Collect dst loop stats after memref privatization transformation.
-          LoopNestStateCollector dstLoopCollector;
-          dstLoopCollector.collect(dstAffineForOp.getOperation());
-
-          // Clear and add back loads and stores.
-          mdg->clearNodeLoadAndStores(dstNode->id);
-          mdg->addToNode(dstId, dstLoopCollector.loadOpInsts,
-                         dstLoopCollector.storeOpInsts);
+                     << "\n");
 
           // Originally conditional, but we're just always removing src loop
           LLVM_DEBUG(llvm::dbgs()
