@@ -18,3 +18,6 @@ func @should_fuse_raw_dep_for_locality() {
   // CHECK-NEXT: return
   return
 }
+
+
+// AARON: write test where there is a data dependence and the loops can't be fused
