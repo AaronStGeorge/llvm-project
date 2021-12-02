@@ -132,7 +132,6 @@ int dumpMLIR() {
     // the operations.
     mlir::OpPassManager &optPM = pm.nest<mlir::FuncOp>();
     optPM.addPass(mlir::toy::createShapeInferencePass());
-    optPM.addPass(mlir::createMyPass()); // HOPE!
     optPM.addPass(mlir::createCanonicalizerPass());
     optPM.addPass(mlir::createCSEPass());
   }
@@ -148,6 +147,7 @@ int dumpMLIR() {
     // Add optimizations if enabled.
     if (enableOpt) {
       optPM.addPass(mlir::createLoopFusionPass(0,0,false, mlir::FusionMode::ProducerConsumer));
+//      optPM.addPass(mlir::createMyPass()); // HOPE!
       optPM.addPass(mlir::createAffineScalarReplacementPass());
     }
   }

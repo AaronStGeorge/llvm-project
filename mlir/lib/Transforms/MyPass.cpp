@@ -11,8 +11,9 @@
 
 using namespace mlir;
 
+namespace IDidNotWrite = mlir;
+
 namespace {
-/// Loop invariant code motion (LICM) pass.
 struct MyPass : public MyPassBase<MyPass> {
   void runOnFunction() override;
 };
@@ -23,67 +24,67 @@ std::unique_ptr<OperationPass<FuncOp>> mlir::createMyPass() {
 }
 
 namespace {
-struct Node {
-  unsigned nodeId;
+/// This stores information related to an affine for op.
+struct AffineForOpInfo {
   Operation *op;
-  SmallVector<Operation *> loads;
-  SmallVector<Operation *> stores;
+  DenseSet<Value> reads;
+  DenseSet<Value> writes;
 
-  explicit Node(unsigned nodeId, Operation *op, SmallVector<Operation *> loads,
-                SmallVector<Operation *> stores)
-      : nodeId(nodeId), op(op), loads(loads), stores(stores) {}
-  ~Node() = default;
-  Node(const Node &other) = delete;
-  Node(Node &&other) noexcept = default;
-  Node &operator=(const Node &other) = delete;
-  Node &operator=(Node &&other) noexcept = delete;
+  explicit AffineForOpInfo(Operation *op, DenseSet<Value> reads,
+                           DenseSet<Value> writes)
+      : op(op), reads(reads), writes(writes) {}
+  ~AffineForOpInfo() = default;
+  AffineForOpInfo(const AffineForOpInfo &other) = delete;
+  AffineForOpInfo(AffineForOpInfo &&other) noexcept = default;
+  AffineForOpInfo &operator=(const AffineForOpInfo &other) = delete;
+  AffineForOpInfo &operator=(AffineForOpInfo &&other) noexcept = delete;
 };
 } // namespace
 
 void MyPass::runOnFunction() {
-  auto f{getFunction()};
-  DenseMap<unsigned, Node> nodes;
+  // Find Affine For Ops.
+  std::vector<AffineForOpInfo> forOps;
   unsigned nodeId = 0;
-  for (auto &forOp : f.front()) {
+  for (auto &forOp : getFunction().front()) {
     if (!isa<AffineForOp>(forOp)) {
       continue;
     }
-    SmallVector<Operation *, 4> loads;
-    SmallVector<Operation *, 4> stores;
+    DenseSet<Value> reads;
+    DenseSet<Value> writes;
     forOp.walk([&](Operation *op) {
       if (isa<AffineReadOpInterface>(op)) {
-        loads.push_back(op);
+        reads.insert(cast<AffineReadOpInterface>(op).getMemRef());
       } else if (isa<AffineWriteOpInterface>(op)) {
-        stores.push_back(op);
+        writes.insert(cast<AffineWriteOpInterface>(op).getMemRef());
       }
     });
-    Node n{nodeId, &forOp, std::move(loads), std::move(stores)};
-    nodes.insert({nodeId, std::move(n)});
+    AffineForOpInfo info{&forOp, std::move(reads), std::move(writes)};
+    forOps.push_back(std::move(info));
     nodeId++;
   }
 
-  DenseMap<unsigned, unsigned> producerConsumerCandidates;
-  for (auto &idAndNode : nodes) {
-    unsigned srcId{idAndNode.first};
-    const Node &srcNode{idAndNode.second};
-    DenseSet<Value> memRefs;
-    for (Operation *store : srcNode.stores) {
-      memRefs.insert(cast<AffineWriteOpInterface>(store).getMemRef());
-    }
+  // Make all legal fusion. For ops in array will be in code  sequential order
+  // so anything after a given node is a potentially viable fusion candidate.
+  for (unsigned srcId = 0; srcId < forOps.size(); srcId++) {
+    const AffineForOpInfo &srcInfo{forOps.at(srcId)};
+
     for (unsigned dstId = srcId + 1; dstId < nodeId; dstId++) {
-      const Node &dstNode{nodes.find(dstId)->second};
-      if (llvm::any_of(dstNode.loads, [&](Operation *op) {
-            auto loadOp = cast<AffineReadOpInterface>(op);
-            return memRefs.count(loadOp.getMemRef()) > 0;
+      const AffineForOpInfo &dstInfo{forOps.at(dstId)};
+
+      if (llvm::any_of(dstInfo.reads, [&](Value op) {
+            return srcInfo.writes.count(op) > 0;
           })) {
-        auto srcAffineForOp = cast<AffineForOp>(srcNode.op);
-        auto dstAffineForOp = cast<AffineForOp>(dstNode.op);
+        auto srcAffineForOp = cast<AffineForOp>(srcInfo.op);
+        auto dstAffineForOp = cast<AffineForOp>(dstInfo.op);
+
         ComputationSliceState computationSliceState = ComputationSliceState();
-        FusionResult result = mlir::canFuseLoops(
+        FusionResult result = IDidNotWrite::canFuseLoops(
             srcAffineForOp, dstAffineForOp, 1, &computationSliceState,
             FusionStrategy::ProducerConsumer);
+
         if (result.value == FusionResult::Success) {
-          fuseLoops(srcAffineForOp, dstAffineForOp, computationSliceState);
+          IDidNotWrite::fuseLoops(srcAffineForOp, dstAffineForOp,
+                                  computationSliceState);
           srcAffineForOp.erase();
         }
       }
