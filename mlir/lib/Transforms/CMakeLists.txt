@@ -11,7 +11,6 @@ add_mlir_library(MLIRTransforms
   LoopCoalescing.cpp
   LoopFusion.cpp
   MyPass.cpp
-  SmallLoopFusion.cpp
   LoopInvariantCodeMotion.cpp
   NormalizeMemRefs.cpp
   OpStats.cpp

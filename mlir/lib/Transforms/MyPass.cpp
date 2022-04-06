@@ -63,8 +63,9 @@ void MyPass::runOnFunction() {
     nodeId++;
   }
 
-  // Make all legal fusion. For ops in array will be in code  sequential order
-  // so anything after a given node is a potentially viable fusion candidate.
+  // Make all legal fusions. For ops in array will be in the order they appeared
+  // in source code so anything after a given node is a potentially viable
+  // fusion candidate.
   for (unsigned srcId = 0; srcId < forOps.size(); srcId++) {
     const AffineForOpInfo &srcInfo{forOps.at(srcId)};
 

@@ -86,9 +86,6 @@ createLoopFusionPass(unsigned fastMemorySpace = 0,
                      bool maximalFusion = false,
                      enum FusionMode fusionMode = FusionMode::Greedy);
 
-std::unique_ptr<OperationPass<FuncOp>>
-createSmallLoopFusionPass();
-
 /// Creates a loop invariant code motion pass that hoists loop invariant
 /// instructions out of the loop.
 std::unique_ptr<Pass> createLoopInvariantCodeMotionPass();

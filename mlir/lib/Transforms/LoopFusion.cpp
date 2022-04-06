@@ -717,7 +717,6 @@ static void getProducerCandidates(unsigned dstId, MemRefDependenceGraph *mdg,
   }
 
   std::sort(srcIdCandidates.begin(), srcIdCandidates.end());
-  // TODO: what the fuck does this shit below do?
   srcIdCandidates.erase(
       std::unique(srcIdCandidates.begin(), srcIdCandidates.end()),
       srcIdCandidates.end());

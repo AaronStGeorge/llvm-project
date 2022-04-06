@@ -3,7 +3,7 @@
 // CHECK-LABEL: func @should_fuse_raw_dep_for_locality() {
 func @should_fuse_raw_dep_for_locality() {
   %m = memref.alloc() : memref<10xf32>
-  %cf7 = constant 7.0 : f32
+  %cf7 = arith.constant 7.0 : f32
 
   affine.for %i0 = 0 to 10 {
     affine.store %cf7, %m[%i0] : memref<10xf32>
@@ -24,7 +24,7 @@ func @should_fuse_raw_dep_for_locality() {
 // CHECK-LABEL: func @should_not_fuse_reverse_loop() {
 func @should_not_fuse_reverse_loop() {
   %m = memref.alloc() : memref<10xf32>
-  %cf7 = constant 7.0 : f32
+  %cf7 = arith.constant 7.0 : f32
 
   affine.for %i0 = 10 to 0 {
     affine.store %cf7, %m[%i0] : memref<10xf32>
@@ -49,7 +49,7 @@ func @should_not_fuse_no_deps() {
   %a = memref.alloc() : memref<10xf32>
   %b = memref.alloc() : memref<10xf32>
 
-  %cf7 = constant 7.0 : f32
+  %cf7 = arith.constant 7.0 : f32
 
   affine.for %i0 = 0 to 10 {
     affine.store %cf7, %a[%i0] : memref<10xf32>

@@ -148,18 +148,6 @@ def AffineLoopFusion : FunctionPass<"affine-loop-fusion"> {
   let dependentDialects = ["memref::MemRefDialect"];
 }
 
-
-def SmallAffineLoopFusion : FunctionPass<"small-affine-loop-fusion"> {
-let summary = "Fuse affine loop nests";
-let description = [{
-    A version of Affine Loop Fusion with everything not needed to pass easiest
-    test case removed
-}];
-let constructor = "mlir::createSmallLoopFusionPass()";
-let options = [];
-  let dependentDialects = ["memref::MemRefDialect"];
-}
-
 def AffinePipelineDataTransfer
     : FunctionPass<"affine-pipeline-data-transfer"> {
   let summary = "Pipeline non-blocking data transfers between explicitly "
