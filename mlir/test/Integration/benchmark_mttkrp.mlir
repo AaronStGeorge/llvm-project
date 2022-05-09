@@ -1,0 +1,150 @@
+// RUN: mlir-opt %s \
+// RUN:   --sparsification --sparse-tensor-conversion \
+// RUN:   --convert-vector-to-scf --convert-scf-to-std \
+// RUN:   --func-bufferize --tensor-constant-bufferize --tensor-bufferize \
+// RUN:   --std-bufferize --finalizing-bufferize --lower-affine \
+// RUN:   --convert-vector-to-llvm --convert-memref-to-llvm --convert-std-to-llvm --reconcile-unrealized-casts | \
+// RUN: TENSOR0="%mlir_integration_test_dir/data/mttkrp_b.tns" \
+// RUN: mlir-cpu-runner \
+// RUN:  -e entry -entry-point-result=void  \
+// RUN:  -shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext,%mlir_integration_test_dir/libmlir_runner_utils%shlibext
+
+!Filename = type !llvm.ptr<i8>
+
+//
+// Integration test that lowers a kernel annotated as sparse to
+// actual sparse code, initializes a matching sparse storage scheme
+// from file, and runs the resulting code with the JIT compiler.
+//
+module {
+  func private @coords(!llvm.ptr<i8>, index) -> memref<?xindex> attributes {llvm.emit_c_interface}
+  func private @getTensorFilename(index) -> (!Filename)
+  func private @print_memref_f64(memref<*xf64>) attributes { llvm.emit_c_interface }
+  func private @print_memref_i64(memref<*xindex>) attributes { llvm.emit_c_interface }
+  func private @read_coo(!llvm.ptr<i8>) -> !llvm.ptr<i8> attributes {llvm.emit_c_interface}
+  func private @values(!Filename) -> memref<?xf64> attributes {llvm.emit_c_interface}
+
+  func @output_memref_index(%0 : memref<?xindex>) -> () {
+    %unranked = memref.cast %0 : memref<?xindex> to memref<*xindex>
+    call @print_memref_i64(%unranked) : (memref<*xindex>) -> ()
+    return
+  }
+
+  func @output_memref_f64(%0 : memref<?xf64>) -> () {
+    %unranked = memref.cast %0 : memref<?xf64> to memref<*xf64>
+    call @print_memref_f64(%unranked) : (memref<*xf64>) -> ()
+    return
+  }
+
+  func @mttkrp_coo(%argb_coord_0 : memref<?xindex>,
+                   %argb_coord_1 : memref<?xindex>,
+                   %argb_coord_2 : memref<?xindex>,
+                   %argb_values : memref<?xf64>,
+                   %nnz : index,
+                   %argc: memref<?x?xf64>,
+                   %argd: memref<?x?xf64>,
+                   %arga: memref<?x?xf64>) -> memref<?x?xf64> {
+    // for (i = 0; i < I; i++)
+    //   for (j = 0; j < J; j++)
+    //     for (k = 0; k < K; k++)
+    //       for (l = 0; l < L; l++)
+    //         A[i,j] += B[i,k,l]*D[l,j]*C[k,j];
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %c4 = arith.constant 4 : index
+    %c5 = arith.constant 5 : index
+    %J = arith.constant 5 : index
+    scf.for %i_k = %c0 to %nnz step %c1 {
+      scf.for %j = %c0 to %c5 step %c1 {
+        %i = memref.load %argb_coord_0[%i_k] : memref<?xindex>
+        %k = memref.load %argb_coord_1[%i_k] : memref<?xindex>
+        %l = memref.load %argb_coord_2[%i_k] : memref<?xindex>
+        %a_i_j = memref.load %arga[%i, %j] : memref<?x?xf64>
+        %b_i_k_l = memref.load %argb_values[%i_k] : memref<?xf64>
+        %d_l_j = memref.load %argd[%l, %j] : memref<?x?xf64>
+        %c_k_j = memref.load %argd[%k, %j] : memref<?x?xf64>
+        %0 = arith.mulf %b_i_k_l, %d_l_j : f64
+        %1 = arith.mulf %0, %c_k_j : f64
+        %2 = arith.addf %1, %a_i_j : f64
+        memref.store %2, %arga[%i, %j] : memref<?x?xf64>
+      }
+    }
+    return %arga : memref<?x?xf64>
+  }
+
+  //
+  // Main driver that reads matrix from file and calls the sparse kernel.
+  //
+  func @entry() {
+    %i0 = arith.constant 0. : f64
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %c4 = arith.constant 4 : index
+    %c5 = arith.constant 5 : index
+    %c17 = arith.constant 17 : index
+
+    // Read the sparse B input from a file.
+    %filename = call @getTensorFilename(%c0) : (index) -> !Filename
+    %storage = call @read_coo(%filename) : (!Filename) -> !llvm.ptr<i8>
+    %b_coord_0 = call @coords(%storage, %c0) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
+    %b_coord_1 = call @coords(%storage, %c1) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
+    %b_coord_2 = call @coords(%storage, %c2) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
+    %b_values = call @values(%storage) : (!llvm.ptr<i8>) -> (memref<?xf64>)
+    call @output_memref_index(%b_coord_0) : (memref<?xindex>) -> ()
+    call @output_memref_index(%b_coord_1) : (memref<?xindex>) -> ()
+    call @output_memref_index(%b_coord_2) : (memref<?xindex>) -> ()
+    call @output_memref_f64(%b_values) : (memref<?xf64>) -> ()
+
+    // Initialize dense C and D inputs and dense output A.
+    %cdata = memref.alloc(%c3, %c5) : memref<?x?xf64>
+    scf.for %i = %c0 to %c3 step %c1 {
+      scf.for %j = %c0 to %c5 step %c1 {
+        %k0 = arith.muli %i, %c5 : index
+        %k1 = arith.addi %k0, %j : index
+        %k2 = arith.index_cast %k1 : index to i32
+        %k = arith.sitofp %k2 : i32 to f64
+        memref.store %k, %cdata[%i, %j] : memref<?x?xf64>
+      }
+    }
+    %c = bufferization.to_tensor %cdata : memref<?x?xf64>
+
+    %ddata = memref.alloc(%c4, %c5) : memref<?x?xf64>
+    scf.for %i = %c0 to %c4 step %c1 {
+      scf.for %j = %c0 to %c5 step %c1 {
+        %k0 = arith.muli %i, %c5 : index
+        %k1 = arith.addi %k0, %j : index
+        %k2 = arith.index_cast %k1 : index to i32
+        %k = arith.sitofp %k2 : i32 to f64
+        memref.store %k, %ddata[%i, %j] : memref<?x?xf64>
+      }
+    }
+    %d = bufferization.to_tensor %ddata : memref<?x?xf64>
+
+    %adata = memref.alloc(%c2, %c5) : memref<?x?xf64>
+    scf.for %i = %c0 to %c2 step %c1 {
+      scf.for %j = %c0 to %c5 step %c1 {
+        memref.store %i0, %adata[%i, %j] : memref<?x?xf64>
+      }
+    }
+    %a = bufferization.to_tensor %adata : memref<?x?xf64>
+
+    // Call kernel.
+    %out = call @mttkrp_coo(%b_coord_0, %b_coord_1,
+                            %b_coord_2, %b_values,
+                            %c17, %cdata, %ddata,
+                            %adata) : (memref<?xindex>, memref<?xindex>,
+                                       memref<?xindex>, memref<?xf64>,
+                                       index, memref<?x?xf64>, memref<?x?xf64>,
+                                       memref<?x?xf64>) -> memref<?x?xf64>
+
+    %v = vector.transfer_read %out[%c0, %c0], %i0
+          : memref<?x?xf64>, vector<2x5xf64>
+    vector.print %v : vector<2x5xf64>
+
+    return
+  }
+}

@@ -1583,6 +1583,7 @@ FOREVERY_V(IMPL_SPARSEVALUES)
     ref->sizes[0] = v->size();                                                 \
     ref->strides[0] = 1;                                                       \
   }
+
 /// Methods that provide direct access to pointers.
 #define IMPL_SPARSEPOINTERS(PNAME, P)                                          \
   IMPL_GETOVERHEAD(sparsePointers##PNAME, P, getPointers)
@@ -1707,6 +1708,85 @@ FOREVERY_V(IMPL_OUTSPARSETENSOR)
 // an external runtime that wants to interact with MLIR compiler-generated code.
 //
 //===----------------------------------------------------------------------===//
+
+struct COO {
+  COO(uint64_t nnz, uint64_t rank) {
+    coord =
+        std::vector<std::vector<uint64_t>>(rank, std::vector<uint64_t>(nnz));
+    values = std::vector<double>(nnz);
+  }
+
+public:
+  std::vector<std::vector<uint64_t>> coord;
+  std::vector<double> values;
+};
+
+void *_mlir_ciface_read_coo(char *filename) {
+  FILE *file = fopen(filename, "r");
+  if (!file) {
+    fprintf(stderr, "Cannot find %s\n", filename);
+    exit(1);
+  }
+  char line[kColWidth];
+  uint64_t idata[512];
+  bool isSymmetric = false;
+  bool isPattern = false;
+  if (strstr(filename, ".mtx")) {
+    readMMEHeader(file, filename, line, idata, &isPattern, &isSymmetric);
+  } else if (strstr(filename, ".tns")) {
+    readExtFROSTTHeader(file, filename, line, idata);
+  } else {
+    fprintf(stderr, "Unknown format %s\n", filename);
+    exit(1);
+  }
+  uint64_t rank = idata[0];
+  uint64_t nnz = idata[1];
+
+  auto dims = std::vector<uint64_t>(rank);
+  for (index_type i = 0; i < rank; i++) {
+    dims[i] = idata[i + 2];
+  }
+
+  COO *coo = new COO(nnz, rank);
+
+  std::vector<std::vector<index_type>> &coord = coo->coord;
+  std::vector<double> &values = coo->values;
+
+// Read file into vectors
+  for (uint64_t k = 0; k < nnz; k++) {
+    if (!fgets(line, kColWidth, file)) {
+      fprintf(stderr, "Cannot find next line of data in %s\n", filename);
+      exit(1);
+    }
+    char *linePtr = line;
+    for (uint64_t r = 0; r < rank; r++) {
+      uint64_t idx = strtoul(linePtr, &linePtr, 10);
+      coord[r][k] = idx - 1;
+    }
+
+    double value = strtod(linePtr, &linePtr);
+    values[k] = value;
+  }
+
+  return coo;
+}
+
+void _mlir_ciface_coords(StridedMemRefType<index_type, 1> *ref, void *coo,
+                         index_type dim) {
+  std::vector<index_type> &v = static_cast<COO *>(coo)->coord[dim];
+  ref->basePtr = ref->data = v.data();
+  ref->offset = 0;
+  ref->sizes[0] = v.size();
+  ref->strides[0] = 1;
+}
+
+void _mlir_ciface_values(StridedMemRefType<double, 1> *ref, void *coo) {
+  std::vector<double> &v = static_cast<COO *>(coo)->values;
+  ref->basePtr = ref->data = v.data();
+  ref->offset = 0;
+  ref->sizes[0] = v.size();
+  ref->strides[0] = 1;
+}
 
 /// Helper method to read a sparse tensor filename from the environment,
 /// defined with the naming convention ${TENSOR0}, ${TENSOR1}, etc.
