@@ -23,6 +23,7 @@ module {
   func private @print_memref_i64(memref<*xindex>) attributes { llvm.emit_c_interface }
   func private @read_coo(!llvm.ptr<i8>) -> !llvm.ptr<i8> attributes {llvm.emit_c_interface}
   func private @values(!Filename) -> memref<?xf64> attributes {llvm.emit_c_interface}
+  func private @rtclock() -> f64
 
   func @output_memref_index(%0 : memref<?xindex>) -> () {
     %unranked = memref.cast %0 : memref<?xindex> to memref<*xindex>
@@ -41,6 +42,7 @@ module {
                    %argb_coord_2 : memref<?xindex>,
                    %argb_values : memref<?xf64>,
                    %nnz : index,
+                   %J : index,
                    %argc: memref<?x?xf64>,
                    %argd: memref<?x?xf64>,
                    %arga: memref<?x?xf64>) -> memref<?x?xf64> {
@@ -51,13 +53,8 @@ module {
     //         A[i,j] += B[i,k,l]*D[l,j]*C[k,j];
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %c2 = arith.constant 2 : index
-    %c3 = arith.constant 3 : index
-    %c4 = arith.constant 4 : index
-    %c5 = arith.constant 5 : index
-    %J = arith.constant 5 : index
     scf.for %i_k = %c0 to %nnz step %c1 {
-      scf.for %j = %c0 to %c5 step %c1 {
+      scf.for %j = %c0 to %J step %c1 {
         %i = memref.load %argb_coord_0[%i_k] : memref<?xindex>
         %k = memref.load %argb_coord_1[%i_k] : memref<?xindex>
         %l = memref.load %argb_coord_2[%i_k] : memref<?xindex>
@@ -82,10 +79,13 @@ module {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
-    %c3 = arith.constant 3 : index
-    %c4 = arith.constant 4 : index
-    %c5 = arith.constant 5 : index
-    %c17 = arith.constant 17 : index
+
+    // dimensions of matrices
+    %I = arith.constant 2 : index
+    %J = arith.constant 5 : index
+    %K = arith.constant 3 : index
+    %L = arith.constant 4 : index
+    %nnz = arith.constant 17 : index
 
     // Read the sparse B input from a file.
     %filename = call @getTensorFilename(%c0) : (index) -> !Filename
@@ -100,10 +100,10 @@ module {
     call @output_memref_f64(%b_values) : (memref<?xf64>) -> ()
 
     // Initialize dense C and D inputs and dense output A.
-    %cdata = memref.alloc(%c3, %c5) : memref<?x?xf64>
-    scf.for %i = %c0 to %c3 step %c1 {
-      scf.for %j = %c0 to %c5 step %c1 {
-        %k0 = arith.muli %i, %c5 : index
+    %cdata = memref.alloc(%K, %J) : memref<?x?xf64>
+    scf.for %i = %c0 to %K step %c1 {
+      scf.for %j = %c0 to %J step %c1 {
+        %k0 = arith.muli %i, %J : index
         %k1 = arith.addi %k0, %j : index
         %k2 = arith.index_cast %k1 : index to i32
         %k = arith.sitofp %k2 : i32 to f64
@@ -112,10 +112,10 @@ module {
     }
     %c = bufferization.to_tensor %cdata : memref<?x?xf64>
 
-    %ddata = memref.alloc(%c4, %c5) : memref<?x?xf64>
-    scf.for %i = %c0 to %c4 step %c1 {
-      scf.for %j = %c0 to %c5 step %c1 {
-        %k0 = arith.muli %i, %c5 : index
+    %ddata = memref.alloc(%L, %J) : memref<?x?xf64>
+    scf.for %i = %c0 to %L step %c1 {
+      scf.for %j = %c0 to %J step %c1 {
+        %k0 = arith.muli %i, %J : index
         %k1 = arith.addi %k0, %j : index
         %k2 = arith.index_cast %k1 : index to i32
         %k = arith.sitofp %k2 : i32 to f64
@@ -124,22 +124,28 @@ module {
     }
     %d = bufferization.to_tensor %ddata : memref<?x?xf64>
 
-    %adata = memref.alloc(%c2, %c5) : memref<?x?xf64>
-    scf.for %i = %c0 to %c2 step %c1 {
-      scf.for %j = %c0 to %c5 step %c1 {
+    %adata = memref.alloc(%I, %J) : memref<?x?xf64>
+    scf.for %i = %c0 to %I step %c1 {
+      scf.for %j = %c0 to %J step %c1 {
         memref.store %i0, %adata[%i, %j] : memref<?x?xf64>
       }
     }
     %a = bufferization.to_tensor %adata : memref<?x?xf64>
 
+    %t_start_mttkrp_coo = call @rtclock() : () -> f64
     // Call kernel.
     %out = call @mttkrp_coo(%b_coord_0, %b_coord_1,
                             %b_coord_2, %b_values,
-                            %c17, %cdata, %ddata,
+                            %nnz, %J, %cdata, %ddata,
                             %adata) : (memref<?xindex>, memref<?xindex>,
                                        memref<?xindex>, memref<?xf64>,
-                                       index, memref<?x?xf64>, memref<?x?xf64>,
-                                       memref<?x?xf64>) -> memref<?x?xf64>
+                                       index, index, memref<?x?xf64>, 
+                                       memref<?x?xf64>, memref<?x?xf64>) 
+                                       -> memref<?x?xf64>
+    %t_end_mttkrp_coo = call @rtclock() : () -> f64
+    %t_mttkrp_coo = arith.subf %t_end_mttkrp_coo, %t_start_mttkrp_coo: f64
+
+    vector.print %t_mttkrp_coo : f64
 
     %v = vector.transfer_read %out[%c0, %c0], %i0
           : memref<?x?xf64>, vector<2x5xf64>
