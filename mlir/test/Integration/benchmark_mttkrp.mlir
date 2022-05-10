@@ -1,5 +1,4 @@
 // RUN: mlir-opt %s \
-// RUN:   --sparsification --sparse-tensor-conversion \
 // RUN:   --convert-vector-to-scf --convert-scf-to-std \
 // RUN:   --func-bufferize --tensor-constant-bufferize --tensor-bufferize \
 // RUN:   --std-bufferize --finalizing-bufferize --lower-affine \
@@ -9,21 +8,16 @@
 // RUN:  -e entry -entry-point-result=void  \
 // RUN:  -shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext,%mlir_integration_test_dir/libmlir_runner_utils%shlibext
 
-!Filename = type !llvm.ptr<i8>
 
-//
-// Integration test that lowers a kernel annotated as sparse to
-// actual sparse code, initializes a matching sparse storage scheme
-// from file, and runs the resulting code with the JIT compiler.
-//
 module {
   func private @coords(!llvm.ptr<i8>, index) -> memref<?xindex> attributes {llvm.emit_c_interface}
-  func private @getTensorFilename(index) -> (!Filename)
+  func private @getTensorFilename(index) -> (!llvm.ptr<i8>)
   func private @print_memref_f64(memref<*xf64>) attributes { llvm.emit_c_interface }
   func private @print_memref_i64(memref<*xindex>) attributes { llvm.emit_c_interface }
   func private @read_coo(!llvm.ptr<i8>) -> !llvm.ptr<i8> attributes {llvm.emit_c_interface}
-  func private @values(!Filename) -> memref<?xf64> attributes {llvm.emit_c_interface}
+  func private @values(!llvm.ptr<i8>) -> memref<?xf64> attributes {llvm.emit_c_interface}
   func private @rtclock() -> f64
+  func private @nano_time() -> i64 attributes {llvm.emit_c_interface}
 
   func @output_memref_index(%0 : memref<?xindex>) -> () {
     %unranked = memref.cast %0 : memref<?xindex> to memref<*xindex>
@@ -88,8 +82,8 @@ module {
     %nnz = arith.constant 17 : index
 
     // Read the sparse B input from a file.
-    %filename = call @getTensorFilename(%c0) : (index) -> !Filename
-    %storage = call @read_coo(%filename) : (!Filename) -> !llvm.ptr<i8>
+    %filename = call @getTensorFilename(%c0) : (index) -> !llvm.ptr<i8>
+    %storage = call @read_coo(%filename) : (!llvm.ptr<i8>) -> !llvm.ptr<i8>
     %b_coord_0 = call @coords(%storage, %c0) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
     %b_coord_1 = call @coords(%storage, %c1) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
     %b_coord_2 = call @coords(%storage, %c2) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
@@ -132,7 +126,7 @@ module {
     }
     %a = bufferization.to_tensor %adata : memref<?x?xf64>
 
-    %t_start_mttkrp_coo = call @rtclock() : () -> f64
+    %t_start_mttkrp_coo = call @nano_time() : () -> i64
     // Call kernel.
     %out = call @mttkrp_coo(%b_coord_0, %b_coord_1,
                             %b_coord_2, %b_values,
@@ -142,10 +136,10 @@ module {
                                        index, index, memref<?x?xf64>, 
                                        memref<?x?xf64>, memref<?x?xf64>) 
                                        -> memref<?x?xf64>
-    %t_end_mttkrp_coo = call @rtclock() : () -> f64
-    %t_mttkrp_coo = arith.subf %t_end_mttkrp_coo, %t_start_mttkrp_coo: f64
+    %t_end_mttkrp_coo = call @nano_time() : () -> i64
+    %t_mttkrp_coo = arith.subi %t_end_mttkrp_coo, %t_start_mttkrp_coo: i64
 
-    vector.print %t_mttkrp_coo : f64
+    vector.print %t_mttkrp_coo : i64
 
     %v = vector.transfer_read %out[%c0, %c0], %i0
           : memref<?x?xf64>, vector<2x5xf64>
