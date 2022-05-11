@@ -95,25 +95,25 @@ module {
 
     // Initialize dense C and D inputs and dense output A.
     %cdata = memref.alloc(%K, %J) : memref<?x?xf64>
-    scf.for %i = %c0 to %K step %c1 {
+    scf.for %k = %c0 to %K step %c1 {
       scf.for %j = %c0 to %J step %c1 {
-        %k0 = arith.muli %i, %J : index
-        %k1 = arith.addi %k0, %j : index
-        %k2 = arith.index_cast %k1 : index to i32
-        %k = arith.sitofp %k2 : i32 to f64
-        memref.store %k, %cdata[%i, %j] : memref<?x?xf64>
+        %v0 = arith.muli %k, %J : index
+        %v1 = arith.addi %v0, %j : index
+        %v2 = arith.index_cast %v1 : index to i32
+        %v = arith.sitofp %v2 : i32 to f64
+        memref.store %v, %cdata[%k, %j] : memref<?x?xf64>
       }
     }
     %c = bufferization.to_tensor %cdata : memref<?x?xf64>
 
     %ddata = memref.alloc(%L, %J) : memref<?x?xf64>
-    scf.for %i = %c0 to %L step %c1 {
+    scf.for %l = %c0 to %L step %c1 {
       scf.for %j = %c0 to %J step %c1 {
-        %k0 = arith.muli %i, %J : index
-        %k1 = arith.addi %k0, %j : index
-        %k2 = arith.index_cast %k1 : index to i32
-        %k = arith.sitofp %k2 : i32 to f64
-        memref.store %k, %ddata[%i, %j] : memref<?x?xf64>
+        %v0 = arith.muli %l, %J : index
+        %v1 = arith.addi %v0, %j : index
+        %v2 = arith.index_cast %v1 : index to i32
+        %v = arith.sitofp %v2 : i32 to f64
+        memref.store %v, %ddata[%l, %j] : memref<?x?xf64>
       }
     }
     %d = bufferization.to_tensor %ddata : memref<?x?xf64>

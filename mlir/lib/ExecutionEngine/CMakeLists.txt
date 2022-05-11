@@ -2,6 +2,7 @@
 # is a big dependency which most don't need.
 
 set(LLVM_OPTIONAL_SOURCES
+  BenchmarkMttkrp.cpp
   AsyncRuntime.cpp
   CRunnerUtils.cpp
   CudaRuntimeWrappers.cpp
@@ -135,6 +136,10 @@ add_mlir_library(mlir_runner_utils
   EXCLUDE_FROM_LIBMLIR
 )
 target_compile_definitions(mlir_runner_utils PRIVATE mlir_runner_utils_EXPORTS)
+
+add_llvm_executable(benchmark_mttkrp BenchmarkMttkrp.cpp)
+
+target_link_libraries(benchmark_mttkrp PRIVATE mlir_runner_utils mlir_c_runner_utils)
 
 add_mlir_library(mlir_async_runtime
   SHARED
