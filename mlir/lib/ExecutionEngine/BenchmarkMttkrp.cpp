@@ -19,9 +19,9 @@ void MttkrpCoo(T &bCoords0, T &bCoords1, T &bCoords2, V &bVals, A &a, A &c, A &d
     uint64_t i = bCoords0[iK];
     uint64_t k = bCoords1[iK];
     uint64_t l = bCoords2[iK];
-    double val = bVals[iK];
+    double bIKL = bVals[iK];
     for (uint64_t j = 0; j < J; j++) {
-      a[i * J + j] += val * d[l * J + j] * c[k * J + j];
+      a[i * J + j] += bIKL * d[l * J + j] * c[k * J + j];
     }
   }
 }

@@ -3,7 +3,7 @@
 // RUN:   --func-bufferize --tensor-constant-bufferize --tensor-bufferize \
 // RUN:   --std-bufferize --finalizing-bufferize --lower-affine \
 // RUN:   --convert-vector-to-llvm --convert-memref-to-llvm --convert-std-to-llvm --reconcile-unrealized-casts | \
-// RUN: TENSOR0="%mlir_integration_test_dir/data/mttkrp_b.tns" \
+// RUN: TENSOR0="%mlir_integration_test_dir/data/nell-2-modified.tns" \
 // RUN: mlir-cpu-runner \
 // RUN:  -e entry -entry-point-result=void  \
 // RUN:  -shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext,%mlir_integration_test_dir/libmlir_runner_utils%shlibext
@@ -48,12 +48,12 @@ module {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     scf.for %i_k = %c0 to %nnz step %c1 {
+      %i = memref.load %argb_coord_0[%i_k] : memref<?xindex>
+      %k = memref.load %argb_coord_1[%i_k] : memref<?xindex>
+      %l = memref.load %argb_coord_2[%i_k] : memref<?xindex>
+      %b_i_k_l = memref.load %argb_values[%i_k] : memref<?xf64>
       scf.for %j = %c0 to %J step %c1 {
-        %i = memref.load %argb_coord_0[%i_k] : memref<?xindex>
-        %k = memref.load %argb_coord_1[%i_k] : memref<?xindex>
-        %l = memref.load %argb_coord_2[%i_k] : memref<?xindex>
         %a_i_j = memref.load %arga[%i, %j] : memref<?x?xf64>
-        %b_i_k_l = memref.load %argb_values[%i_k] : memref<?xf64>
         %d_l_j = memref.load %argd[%l, %j] : memref<?x?xf64>
         %c_k_j = memref.load %argd[%k, %j] : memref<?x?xf64>
         %0 = arith.mulf %b_i_k_l, %d_l_j : f64
@@ -75,11 +75,11 @@ module {
     %c2 = arith.constant 2 : index
 
     // dimensions of matrices
-    %I = arith.constant 2 : index
-    %J = arith.constant 5 : index
-    %K = arith.constant 3 : index
-    %L = arith.constant 4 : index
-    %nnz = arith.constant 17 : index
+    %I = arith.constant 12092 : index
+    %J = arith.constant 5000 : index
+    %K = arith.constant 9184 : index
+    %L = arith.constant 28818 : index
+    %nnz = arith.constant 5879419 : index
 
     // Read the sparse B input from a file.
     %filename = call @getTensorFilename(%c0) : (index) -> !llvm.ptr<i8>
@@ -88,10 +88,11 @@ module {
     %b_coord_1 = call @coords(%storage, %c1) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
     %b_coord_2 = call @coords(%storage, %c2) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
     %b_values = call @values(%storage) : (!llvm.ptr<i8>) -> (memref<?xf64>)
-    call @output_memref_index(%b_coord_0) : (memref<?xindex>) -> ()
-    call @output_memref_index(%b_coord_1) : (memref<?xindex>) -> ()
-    call @output_memref_index(%b_coord_2) : (memref<?xindex>) -> ()
-    call @output_memref_f64(%b_values) : (memref<?xf64>) -> ()
+    // Output is too large
+    // call @output_memref_index(%b_coord_0) : (memref<?xindex>) -> ()
+    // call @output_memref_index(%b_coord_1) : (memref<?xindex>) -> ()
+    // call @output_memref_index(%b_coord_2) : (memref<?xindex>) -> ()
+    // call @output_memref_f64(%b_values) : (memref<?xf64>) -> ()
 
     // Initialize dense C and D inputs and dense output A.
     %cdata = memref.alloc(%K, %J) : memref<?x?xf64>
@@ -141,9 +142,10 @@ module {
 
     vector.print %t_mttkrp_coo : i64
 
-    %v = vector.transfer_read %out[%c0, %c0], %i0
-          : memref<?x?xf64>, vector<2x5xf64>
-    vector.print %v : vector<2x5xf64>
+    // Output is too large
+    // %v = vector.transfer_read %out[%c0, %c0], %i0
+    //       : memref<?x?xf64>, vector<2x5xf64>
+    // vector.print %v : vector<2x5xf64>
 
     return
   }
