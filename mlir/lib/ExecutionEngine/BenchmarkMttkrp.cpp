@@ -9,7 +9,7 @@ void *_mlir_ciface_read_coo(char *filename);
 void _mlir_ciface_coords(StridedMemRefType<uint64_t, 1> *ref, void *coo,
                          uint64_t dim);
 void _mlir_ciface_values(StridedMemRefType<double, 1> *ref, void *coo);
-int64_t _mlir_ciface_nano_time();
+int64_t _mlir_ciface_nanoTime();
 }
 
 template <typename T, typename V, typename A>
@@ -60,9 +60,9 @@ int main() {
   std::vector<double> a = std::vector<double>(I * J);
   std::fill(a.begin(), a.end(), 0.0);
 
-  uint64_t tStartMttkrpCoo = _mlir_ciface_nano_time();
+  uint64_t tStartMttkrpCoo = _mlir_ciface_nanoTime();
   MttkrpCoo(bCoord0, bCoord1, bCoord2, bVals, a, c, d, nnz, J);
-  uint64_t tEndMttkrpCoo = _mlir_ciface_nano_time();
+  uint64_t tEndMttkrpCoo = _mlir_ciface_nanoTime();
   printf("time: %lu\n", tEndMttkrpCoo - tStartMttkrpCoo);
 
 //  printf("A ( ");

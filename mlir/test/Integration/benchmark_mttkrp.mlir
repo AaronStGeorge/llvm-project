@@ -1,8 +1,18 @@
 // RUN: mlir-opt %s \
-// RUN:   --convert-vector-to-scf --convert-scf-to-std \
-// RUN:   --func-bufferize --tensor-constant-bufferize --tensor-bufferize \
-// RUN:   --std-bufferize --finalizing-bufferize --lower-affine \
-// RUN:   --convert-vector-to-llvm --convert-memref-to-llvm --convert-std-to-llvm --reconcile-unrealized-casts | \
+// RUN: --convert-vector-to-scf \
+// RUN: --convert-scf-to-cf \
+// RUN: --func-bufferize \
+// RUN: --arith-bufferize \
+// RUN: --finalizing-bufferize \
+// RUN: --lower-affine \
+// RUN: --convert-vector-to-llvm \
+// RUN: --convert-memref-to-llvm \
+// RUN: --convert-complex-to-standard \
+// RUN: --convert-math-to-llvm \
+// RUN: --convert-complex-to-llvm \
+// RUN: --convert-math-to-libm \
+// RUN: --convert-func-to-llvm \
+// RUN: --reconcile-unrealized-casts |\
 // RUN: TENSOR0="%mlir_integration_test_dir/data/nell-2-modified.tns" \
 // RUN: mlir-cpu-runner \
 // RUN:  -e entry -entry-point-result=void  \
@@ -10,28 +20,28 @@
 
 
 module {
-  func private @coords(!llvm.ptr<i8>, index) -> memref<?xindex> attributes {llvm.emit_c_interface}
-  func private @getTensorFilename(index) -> (!llvm.ptr<i8>)
-  func private @print_memref_f64(memref<*xf64>) attributes { llvm.emit_c_interface }
-  func private @print_memref_i64(memref<*xindex>) attributes { llvm.emit_c_interface }
-  func private @read_coo(!llvm.ptr<i8>) -> !llvm.ptr<i8> attributes {llvm.emit_c_interface}
-  func private @values(!llvm.ptr<i8>) -> memref<?xf64> attributes {llvm.emit_c_interface}
-  func private @rtclock() -> f64
-  func private @nano_time() -> i64 attributes {llvm.emit_c_interface}
+  func.func private @coords(!llvm.ptr<i8>, index) -> memref<?xindex> attributes {llvm.emit_c_interface}
+  func.func private @getTensorFilename(index) -> (!llvm.ptr<i8>)
+  func.func private @printMemrefF64(memref<*xf64>) attributes { llvm.emit_c_interface }
+  func.func private @printMemrefI64(memref<*xindex>) attributes { llvm.emit_c_interface }
+  func.func private @read_coo(!llvm.ptr<i8>) -> !llvm.ptr<i8> attributes {llvm.emit_c_interface}
+  func.func private @values(!llvm.ptr<i8>) -> memref<?xf64> attributes {llvm.emit_c_interface}
+  func.func private @rtclock() -> f64
+  func.func private @nanoTime() -> i64 attributes {llvm.emit_c_interface}
 
-  func @output_memref_index(%0 : memref<?xindex>) -> () {
+  func.func @output_memref_index(%0 : memref<?xindex>) -> () {
     %unranked = memref.cast %0 : memref<?xindex> to memref<*xindex>
-    call @print_memref_i64(%unranked) : (memref<*xindex>) -> ()
+    call @printMemrefI64(%unranked) : (memref<*xindex>) -> ()
     return
   }
 
-  func @output_memref_f64(%0 : memref<?xf64>) -> () {
+  func.func @output_memref_f64(%0 : memref<?xf64>) -> () {
     %unranked = memref.cast %0 : memref<?xf64> to memref<*xf64>
-    call @print_memref_f64(%unranked) : (memref<*xf64>) -> ()
+    call @printMemrefF64(%unranked) : (memref<*xf64>) -> ()
     return
   }
 
-  func @mttkrp_coo(%argb_coord_0 : memref<?xindex>,
+  func.func @mttkrp_coo(%argb_coord_0 : memref<?xindex>,
                    %argb_coord_1 : memref<?xindex>,
                    %argb_coord_2 : memref<?xindex>,
                    %argb_values : memref<?xf64>,
@@ -68,7 +78,7 @@ module {
   //
   // Main driver that reads matrix from file and calls the sparse kernel.
   //
-  func @entry() {
+  func.func @entry() {
     %i0 = arith.constant 0. : f64
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -127,7 +137,7 @@ module {
     }
     %a = bufferization.to_tensor %adata : memref<?x?xf64>
 
-    %t_start_mttkrp_coo = call @nano_time() : () -> i64
+    %t_start_mttkrp_coo = call @nanoTime() : () -> i64
     // Call kernel.
     %out = call @mttkrp_coo(%b_coord_0, %b_coord_1,
                             %b_coord_2, %b_values,
@@ -137,7 +147,7 @@ module {
                                        index, index, memref<?x?xf64>, 
                                        memref<?x?xf64>, memref<?x?xf64>) 
                                        -> memref<?x?xf64>
-    %t_end_mttkrp_coo = call @nano_time() : () -> i64
+    %t_end_mttkrp_coo = call @nanoTime() : () -> i64
     %t_mttkrp_coo = arith.subi %t_end_mttkrp_coo, %t_start_mttkrp_coo: i64
 
     vector.print %t_mttkrp_coo : i64
