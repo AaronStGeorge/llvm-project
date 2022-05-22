@@ -1796,6 +1796,7 @@ char *getTensorFilename(index_type id) {
   char *env = getenv(var);
   if (!env)
     FATAL("Environment variable %s is not set\n", var);
+  printf("filename: %s\n", env);
   return env;
 }
 

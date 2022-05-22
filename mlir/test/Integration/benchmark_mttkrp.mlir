@@ -1,22 +1,31 @@
+// mlir-opt %s \
+// --convert-vector-to-scf \
+// --convert-scf-to-cf \
+// --func-bufferize \
+// --arith-bufferize \
+// --finalizing-bufferize \
+// --convert-vector-to-llvm \
+// --convert-memref-to-llvm \
+// --convert-complex-to-standard \
+// --convert-math-to-llvm \
+// --convert-complex-to-llvm \
+// --convert-math-to-libm \
+// --convert-func-to-llvm \
+// --reconcile-unrealized-casts |\
+// TENSOR0="%mlir_integration_test_dir/data/nell-2-modified.tns" \
+// mlir-cpu-runner \
+//  -e entry -entry-point-result=void  \
+//  -shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext,%mlir_integration_test_dir/libmlir_runner_utils%shlibext
+
+// OpenMP dialect seems to be not fully baked yet
+// mlir-opt %s \
+// --convert-scf-to-openmp 
+
 // RUN: mlir-opt %s \
-// RUN: --convert-vector-to-scf \
-// RUN: --convert-scf-to-cf \
-// RUN: --func-bufferize \
-// RUN: --arith-bufferize \
-// RUN: --finalizing-bufferize \
-// RUN: --lower-affine \
-// RUN: --convert-vector-to-llvm \
-// RUN: --convert-memref-to-llvm \
-// RUN: --convert-complex-to-standard \
-// RUN: --convert-math-to-llvm \
-// RUN: --convert-complex-to-llvm \
-// RUN: --convert-math-to-libm \
-// RUN: --convert-func-to-llvm \
-// RUN: --reconcile-unrealized-casts |\
-// RUN: TENSOR0="%mlir_integration_test_dir/data/nell-2-modified.tns" \
-// RUN: mlir-cpu-runner \
-// RUN:  -e entry -entry-point-result=void  \
-// RUN:  -shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext,%mlir_integration_test_dir/libmlir_runner_utils%shlibext
+// RUN: --convert-parallel-loops-to-gpu
+// --gpu-kernel-outlining \
+// --pass-pipeline='gpu.module(strip-debuginfo,convert-gpu-to-nvvm)' \
+// --gpu-to-llvm
 
 
 module {
@@ -35,8 +44,7 @@ module {
     return
   }
 
-  func.func @output_memref_f64(%0 : memref<?xf64>) -> () {
-    %unranked = memref.cast %0 : memref<?xf64> to memref<*xf64>
+  func.func @output_memref_f64(%unranked : memref<*xf64>) -> () {
     call @printMemrefF64(%unranked) : (memref<*xf64>) -> ()
     return
   }
@@ -57,12 +65,14 @@ module {
     //         A[i,j] += B[i,k,l]*D[l,j]*C[k,j];
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    scf.for %i_k = %c0 to %nnz step %c1 {
-      %i = memref.load %argb_coord_0[%i_k] : memref<?xindex>
-      %k = memref.load %argb_coord_1[%i_k] : memref<?xindex>
-      %l = memref.load %argb_coord_2[%i_k] : memref<?xindex>
-      %b_i_k_l = memref.load %argb_values[%i_k] : memref<?xf64>
-      scf.for %j = %c0 to %J step %c1 {
+    // scf.for %j = %c0 to %J step %c1 {
+    scf.parallel (%j) = (%c0) to (%J) step (%c1) {
+      scf.for %i_k = %c0 to %nnz step %c1 {
+        %i = memref.load %argb_coord_0[%i_k] : memref<?xindex>
+        %k = memref.load %argb_coord_1[%i_k] : memref<?xindex>
+        %l = memref.load %argb_coord_2[%i_k] : memref<?xindex>
+        %b_i_k_l = memref.load %argb_values[%i_k] : memref<?xf64>
+
         %a_i_j = memref.load %arga[%i, %j] : memref<?x?xf64>
         %d_l_j = memref.load %argd[%l, %j] : memref<?x?xf64>
         %c_k_j = memref.load %argd[%k, %j] : memref<?x?xf64>
@@ -71,12 +81,12 @@ module {
         %2 = arith.addf %1, %a_i_j : f64
         memref.store %2, %arga[%i, %j] : memref<?x?xf64>
       }
-    }
+    } { mapping = [{processor = 6, map = affine_map<(d0) -> (d0)>, bound = affine_map<(d0) -> (d0)>}] }
     return %arga : memref<?x?xf64>
   }
 
   //
-  // Main driver that reads matrix from file and calls the sparse kernel.
+  // Main driver that reads matrix from file and calls the kernel.
   //
   func.func @entry() {
     %i0 = arith.constant 0. : f64
@@ -84,12 +94,18 @@ module {
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
 
-    // dimensions of matrices
+    // dimensions of matrices for nell-2-modified
     %I = arith.constant 12092 : index
     %J = arith.constant 5000 : index
     %K = arith.constant 9184 : index
     %L = arith.constant 28818 : index
     %nnz = arith.constant 5879419 : index
+    // dimensions of matrices for mttkrp_b 
+    // %I = arith.constant 2 : index
+    // %J = arith.constant 5 : index
+    // %K = arith.constant 3 : index
+    // %L = arith.constant 4 : index
+    // %nnz = arith.constant 17 : index
 
     // Read the sparse B input from a file.
     %filename = call @getTensorFilename(%c0) : (index) -> !llvm.ptr<i8>
@@ -105,46 +121,48 @@ module {
     // call @output_memref_f64(%b_values) : (memref<?xf64>) -> ()
 
     // Initialize dense C and D inputs and dense output A.
-    %cdata = memref.alloc(%K, %J) : memref<?x?xf64>
+    %c = memref.alloc(%K, %J) : memref<?x?xf64>
     scf.for %k = %c0 to %K step %c1 {
       scf.for %j = %c0 to %J step %c1 {
         %v0 = arith.muli %k, %J : index
         %v1 = arith.addi %v0, %j : index
         %v2 = arith.index_cast %v1 : index to i32
         %v = arith.sitofp %v2 : i32 to f64
-        memref.store %v, %cdata[%k, %j] : memref<?x?xf64>
+        memref.store %v, %c[%k, %j] : memref<?x?xf64>
       }
     }
-    %c = bufferization.to_tensor %cdata : memref<?x?xf64>
+    // %unranked_c = memref.cast %c : memref<?x?xf64> to memref<*xf64>
+    // call @output_memref_f64(%unranked_c) : (memref<*xf64>) -> ()
 
-    %ddata = memref.alloc(%L, %J) : memref<?x?xf64>
+    %d = memref.alloc(%L, %J) : memref<?x?xf64>
     scf.for %l = %c0 to %L step %c1 {
       scf.for %j = %c0 to %J step %c1 {
         %v0 = arith.muli %l, %J : index
         %v1 = arith.addi %v0, %j : index
         %v2 = arith.index_cast %v1 : index to i32
         %v = arith.sitofp %v2 : i32 to f64
-        memref.store %v, %ddata[%l, %j] : memref<?x?xf64>
+        memref.store %v, %d[%l, %j] : memref<?x?xf64>
       }
     }
-    %d = bufferization.to_tensor %ddata : memref<?x?xf64>
+    // %unranked_d = memref.cast %d : memref<?x?xf64> to memref<*xf64>
+    // call @output_memref_f64(%unranked_d) : (memref<*xf64>) -> ()
 
-    %adata = memref.alloc(%I, %J) : memref<?x?xf64>
+    %a = memref.alloc(%I, %J) : memref<?x?xf64>
     scf.for %i = %c0 to %I step %c1 {
       scf.for %j = %c0 to %J step %c1 {
-        memref.store %i0, %adata[%i, %j] : memref<?x?xf64>
+        memref.store %i0, %a[%i, %j] : memref<?x?xf64>
       }
     }
-    %a = bufferization.to_tensor %adata : memref<?x?xf64>
+    // %unranked_a = memref.cast %a : memref<?x?xf64> to memref<*xf64>
+    // call @output_memref_f64(%unranked_a) : (memref<*xf64>) -> ()
 
     %t_start_mttkrp_coo = call @nanoTime() : () -> i64
     // Call kernel.
     %out = call @mttkrp_coo(%b_coord_0, %b_coord_1,
                             %b_coord_2, %b_values,
-                            %nnz, %J, %cdata, %ddata,
-                            %adata) : (memref<?xindex>, memref<?xindex>,
-                                       memref<?xindex>, memref<?xf64>,
-                                       index, index, memref<?x?xf64>, 
+                            %nnz, %J, %c, %d,
+                            %a) : (memref<?xindex>, memref<?xindex>,
+                                       memref<?xindex>, memref<?xf64>, index, index, memref<?x?xf64>, 
                                        memref<?x?xf64>, memref<?x?xf64>) 
                                        -> memref<?x?xf64>
     %t_end_mttkrp_coo = call @nanoTime() : () -> i64
@@ -152,10 +170,10 @@ module {
 
     vector.print %t_mttkrp_coo : i64
 
-    // Output is too large
-    // %v = vector.transfer_read %out[%c0, %c0], %i0
-    //       : memref<?x?xf64>, vector<2x5xf64>
-    // vector.print %v : vector<2x5xf64>
+    // Expected output from  mttkrp_b.tns:
+    // ( ( 16075, 21930, 28505, 35800, 43815 ), ( 10000, 14225, 19180, 24865, 31280 ) )
+    %unranked_a = memref.cast %a : memref<?x?xf64> to memref<*xf64>
+    call @output_memref_f64(%unranked_a) : (memref<*xf64>) -> ()
 
     return
   }
