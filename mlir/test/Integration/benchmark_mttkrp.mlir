@@ -1,31 +1,31 @@
-// mlir-opt %s \
-// --convert-vector-to-scf \
-// --convert-scf-to-cf \
-// --func-bufferize \
-// --arith-bufferize \
-// --finalizing-bufferize \
-// --convert-vector-to-llvm \
-// --convert-memref-to-llvm \
-// --convert-complex-to-standard \
-// --convert-math-to-llvm \
-// --convert-complex-to-llvm \
-// --convert-math-to-libm \
-// --convert-func-to-llvm \
-// --reconcile-unrealized-casts |\
-// TENSOR0="%mlir_integration_test_dir/data/nell-2-modified.tns" \
-// mlir-cpu-runner \
-//  -e entry -entry-point-result=void  \
-//  -shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext,%mlir_integration_test_dir/libmlir_runner_utils%shlibext
+// RUN: mlir-opt %s \
+// RUN: --convert-vector-to-scf \
+// RUN: --convert-scf-to-cf \
+// RUN: --func-bufferize \
+// RUN: --arith-bufferize \
+// RUN: --finalizing-bufferize \
+// RUN: --convert-vector-to-llvm \
+// RUN: --convert-memref-to-llvm \
+// RUN: --convert-complex-to-standard \
+// RUN: --convert-math-to-llvm \
+// RUN: --convert-complex-to-llvm \
+// RUN: --convert-math-to-libm \
+// RUN: --convert-func-to-llvm \
+// RUN: --reconcile-unrealized-casts |\
+// RUN: TENSOR0="%mlir_integration_test_dir/data/mttkrp_b.tns" \
+// RUN: mlir-cpu-runner \
+// RUN:  -e entry -entry-point-result=void  \
+// RUN:  -shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext,%mlir_integration_test_dir/libmlir_runner_utils%shlibext
 
 // OpenMP dialect seems to be not fully baked yet
 // mlir-opt %s \
 // --convert-scf-to-openmp 
 
-// RUN: mlir-opt %s \
-// RUN: --convert-parallel-loops-to-gpu
+// mlir-opt %s \
+// --convert-parallel-loops-to-gpu \
 // --gpu-kernel-outlining \
-// --pass-pipeline='gpu.module(strip-debuginfo,convert-gpu-to-nvvm)' \
-// --gpu-to-llvm
+// --pass-pipeline='gpu.module(strip-debuginfo,convert-gpu-to-nvvm,gpu-to-cubin)'
+// --gpu-to-llvm 
 
 
 module {
@@ -95,17 +95,17 @@ module {
     %c2 = arith.constant 2 : index
 
     // dimensions of matrices for nell-2-modified
-    %I = arith.constant 12092 : index
-    %J = arith.constant 5000 : index
-    %K = arith.constant 9184 : index
-    %L = arith.constant 28818 : index
-    %nnz = arith.constant 5879419 : index
+    // %I = arith.constant 12092 : index
+    // %J = arith.constant 5000 : index
+    // %K = arith.constant 9184 : index
+    // %L = arith.constant 28818 : index
+    // %nnz = arith.constant 5879419 : index
     // dimensions of matrices for mttkrp_b 
-    // %I = arith.constant 2 : index
-    // %J = arith.constant 5 : index
-    // %K = arith.constant 3 : index
-    // %L = arith.constant 4 : index
-    // %nnz = arith.constant 17 : index
+    %I = arith.constant 2 : index
+    %J = arith.constant 5 : index
+    %K = arith.constant 3 : index
+    %L = arith.constant 4 : index
+    %nnz = arith.constant 17 : index
 
     // Read the sparse B input from a file.
     %filename = call @getTensorFilename(%c0) : (index) -> !llvm.ptr<i8>
@@ -114,11 +114,6 @@ module {
     %b_coord_1 = call @coords(%storage, %c1) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
     %b_coord_2 = call @coords(%storage, %c2) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
     %b_values = call @values(%storage) : (!llvm.ptr<i8>) -> (memref<?xf64>)
-    // Output is too large
-    // call @output_memref_index(%b_coord_0) : (memref<?xindex>) -> ()
-    // call @output_memref_index(%b_coord_1) : (memref<?xindex>) -> ()
-    // call @output_memref_index(%b_coord_2) : (memref<?xindex>) -> ()
-    // call @output_memref_f64(%b_values) : (memref<?xf64>) -> ()
 
     // Initialize dense C and D inputs and dense output A.
     %c = memref.alloc(%K, %J) : memref<?x?xf64>
