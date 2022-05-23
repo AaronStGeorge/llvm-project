@@ -2,10 +2,10 @@
 // RUN:   -gpu-kernel-outlining \
 // RUN:   -pass-pipeline='gpu.module(strip-debuginfo,convert-gpu-to-nvvm,gpu-to-cubin)' \
 // RUN:   -gpu-to-llvm \
-// RUN: | mlir-cpu-runner \
-// RUN:   --shared-libs=%linalg_test_lib_dir/libmlir_cuda_runtime%shlibext \
-// RUN:   --shared-libs=%linalg_test_lib_dir/libmlir_runner_utils%shlibext \
-// RUN:   --entry-point-result=void
+//  | mlir-cpu-runner \
+//    --shared-libs=%linalg_test_lib_dir/libmlir_cuda_runtime%shlibext \
+//    --shared-libs=%linalg_test_lib_dir/libmlir_runner_utils%shlibext \
+//    --entry-point-result=void
 
 
 func.func @main() {
@@ -30,15 +30,19 @@ func.func @main() {
   // Read the sparse B input from a file.
   %filename = call @getTensorFilename(%c0) : (index) -> !llvm.ptr<i8>
   %storage = call @read_coo(%filename) : (!llvm.ptr<i8>) -> !llvm.ptr<i8>
+
   %b_coord_0 = call @coords(%storage, %c0) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
   %cast_b_coord_0 = memref.cast %b_coord_0 : memref<?xindex> to memref<*xindex>
   gpu.host_register %cast_b_coord_0 : memref<*xindex>
+
   %b_coord_1 = call @coords(%storage, %c1) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
   %cast_b_coord_1 = memref.cast %b_coord_1 : memref<?xindex> to memref<*xindex>
   gpu.host_register %cast_b_coord_1 : memref<*xindex>
+
   %b_coord_2 = call @coords(%storage, %c2) : (!llvm.ptr<i8>, index) -> (memref<?xindex>)
   %cast_b_coord_2 = memref.cast %b_coord_2 : memref<?xindex> to memref<*xindex>
   gpu.host_register %cast_b_coord_2 : memref<*xindex>
+
   %b_values = call @values(%storage) : (!llvm.ptr<i8>) -> (memref<?xf64>)
   %cast_b_values = memref.cast %b_values : memref<?xf64> to memref<*xf64>
   gpu.host_register %cast_b_values : memref<*xf64>
@@ -88,12 +92,12 @@ func.func @main() {
     gpu.terminator
   }
 
-  call @printMemrefI32(%cast_sum) : (memref<*xi32>) -> ()
-  // CHECK: [0, 2]
+  call @printMemrefF64(%cast_a) : (memref<*xf64>) -> ()
 
   return
 }
 
+func.func private @printMemrefF64(memref<*xf64>) 
 func.func private @printMemrefI32(memref<*xi32>)
 func.func private @getTensorFilename(index) -> (!llvm.ptr<i8>)
 func.func private @read_coo(!llvm.ptr<i8>) -> !llvm.ptr<i8> attributes {llvm.emit_c_interface}

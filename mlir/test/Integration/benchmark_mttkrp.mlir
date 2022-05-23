@@ -75,7 +75,7 @@ module {
 
         %a_i_j = memref.load %arga[%i, %j] : memref<?x?xf64>
         %d_l_j = memref.load %argd[%l, %j] : memref<?x?xf64>
-        %c_k_j = memref.load %argd[%k, %j] : memref<?x?xf64>
+        %c_k_j = memref.load %argc[%k, %j] : memref<?x?xf64>
         %0 = arith.mulf %b_i_k_l, %d_l_j : f64
         %1 = arith.mulf %0, %c_k_j : f64
         %2 = arith.addf %1, %a_i_j : f64
