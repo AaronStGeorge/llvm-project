@@ -1,15 +1,29 @@
 // RUN: mlir-opt %s \
+// RUN:   -convert-vector-to-scf \
+// RUN:   -convert-scf-to-cf \
+// RUN:   -func-bufferize \
+// RUN:   -arith-bufferize \
+// RUN:   -finalizing-bufferize \
 // RUN:   -gpu-kernel-outlining \
 // RUN:   -pass-pipeline='gpu.module(strip-debuginfo,convert-gpu-to-nvvm,gpu-to-cubin)' \
 // RUN:   -gpu-to-llvm \
-//  | mlir-cpu-runner \
-//    --shared-libs=%linalg_test_lib_dir/libmlir_cuda_runtime%shlibext \
-//    --shared-libs=%linalg_test_lib_dir/libmlir_runner_utils%shlibext \
-//    --entry-point-result=void
+// RUN:   -convert-vector-to-llvm \
+// RUN:   -convert-memref-to-llvm \
+// RUN:   -convert-complex-to-standard \
+// RUN:   -convert-math-to-llvm \
+// RUN:   -convert-complex-to-llvm \
+// RUN:   -convert-math-to-libm \
+// RUN:   -convert-func-to-llvm \
+// RUN:   -reconcile-unrealized-casts \
+// RUN: | TENSOR0="%mlir_integration_test_dir/data/mttkrp_b.tns" mlir-cpu-runner \
+// RUN:   --shared-libs=%mlir_integration_test_dir/libmlir_cuda_runtime%shlibext \
+// RUN:   --shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext \
+// RUN:   --shared-libs=%mlir_integration_test_dir/libmlir_runner_utils%shlibext \
+// RUN:   --entry-point-result=void
 
 
 func.func @main() {
-  %i0 = arith.constant 0. : f64
+  %i0 = arith.constant 0.0 : f64
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c2 = arith.constant 2 : index
@@ -84,11 +98,22 @@ func.func @main() {
   }
 
   // AND
-  gpu.launch blocks(%bx, %by, %bz) in (%grid_x = %c2, %grid_y = %c1, %grid_z = %c1)
-             threads(%tx, %ty, %tz) in (%block_x = %c6, %block_y = %c1, %block_z = %c1) {
-    %val = memref.load %data[%bx, %tx] : memref<2x6xi32>
-    %reduced = gpu.all_reduce and %val {} : (i32) -> (i32)
-    memref.store %reduced, %sum[%bx] : memref<2xi32>
+  gpu.launch blocks(%bx, %by, %bz) in (%grid_x = %c1, %grid_y = %c1, %grid_z = %c1)
+             threads(%j, %ty, %tz) in (%block_x = %J, %block_y = %c1, %block_z = %c1) {
+    scf.for %i_k = %c0 to %nnz step %c1 {
+      %i = memref.load %b_coord_0[%i_k] : memref<?xindex>
+      %k = memref.load %b_coord_1[%i_k] : memref<?xindex>
+      %l = memref.load %b_coord_2[%i_k] : memref<?xindex>
+      %b_i_k_l = memref.load %b_values[%i_k] : memref<?xf64>
+
+      %a_i_j = memref.load %a[%i, %j] : memref<?x?xf64>
+      %d_l_j = memref.load %d[%l, %j] : memref<?x?xf64>
+      %c_k_j = memref.load %c[%k, %j] : memref<?x?xf64>
+      %0 = arith.mulf %b_i_k_l, %d_l_j : f64
+      %1 = arith.mulf %0, %c_k_j : f64
+      %2 = arith.addf %1, %a_i_j : f64
+      memref.store %2, %a[%i, %j] : memref<?x?xf64>
+    }
     gpu.terminator
   }
 
