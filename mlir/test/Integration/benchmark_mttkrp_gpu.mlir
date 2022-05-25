@@ -1,27 +1,27 @@
 // RUN: mlir-opt %s \
-// RUN:   -convert-parallel-loops-to-gpu
-//    -lower-affine \
-//    -convert-vector-to-scf \
-//    -convert-scf-to-cf \
-//    -func-bufferize \
-//    -arith-bufferize \
-//    -finalizing-bufferize \
-//    -gpu-kernel-outlining \
-//    -pass-pipeline='gpu.module(strip-debuginfo,convert-gpu-to-nvvm,gpu-to-cubin)' \
-//    -gpu-to-llvm \
-//    -convert-vector-to-llvm \
-//    -convert-memref-to-llvm \
-//    -convert-complex-to-standard \
-//    -convert-math-to-llvm \
-//    -convert-complex-to-llvm \
-//    -convert-math-to-libm \
-//    -convert-func-to-llvm \
-//    -reconcile-unrealized-casts \
-//  | TENSOR0="%mlir_integration_test_dir/data/nell-2-modified.tns" mlir-cpu-runner \
-//    --shared-libs=%mlir_integration_test_dir/libmlir_cuda_runtime%shlibext \
-//    --shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext \
-//    --shared-libs=%mlir_integration_test_dir/libmlir_runner_utils%shlibext \
-//    --entry-point-result=void
+// RUN:   -convert-parallel-loops-to-gpu \
+// RUN:   -lower-affine \
+// RUN:   -convert-vector-to-scf \
+// RUN:   -convert-scf-to-cf \
+// RUN:   -func-bufferize \
+// RUN:   -arith-bufferize \
+// RUN:   -finalizing-bufferize \
+// RUN:   -gpu-kernel-outlining \
+// RUN:   -pass-pipeline='gpu.module(strip-debuginfo,convert-gpu-to-nvvm,gpu-to-cubin)' \
+// RUN:   -gpu-to-llvm \
+// RUN:   -convert-vector-to-llvm \
+// RUN:   -convert-memref-to-llvm \
+// RUN:   -convert-complex-to-standard \
+// RUN:   -convert-math-to-llvm \
+// RUN:   -convert-complex-to-llvm \
+// RUN:   -convert-math-to-libm \
+// RUN:   -convert-func-to-llvm \
+// RUN:   -reconcile-unrealized-casts \
+// RUN: | TENSOR0="%mlir_integration_test_dir/data/nell-2-modified.tns" mlir-cpu-runner \
+// RUN:   --shared-libs=%mlir_integration_test_dir/libmlir_cuda_runtime%shlibext \
+// RUN:   --shared-libs=%mlir_integration_test_dir/libmlir_c_runner_utils%shlibext \
+// RUN:   --shared-libs=%mlir_integration_test_dir/libmlir_runner_utils%shlibext \
+// RUN:   --entry-point-result=void
 
 
 // | TENSOR0="%mlir_integration_test_dir/data/mttkrp_b.tns" mlir-cpu-runner \
@@ -104,29 +104,35 @@ func.func @main() {
 
   %t_start_mttkrp_coo = call @nanoTime() : () -> i64
 
-  scf.parallel (%j) = (%c0) to (%J) step (%c1) {
-    scf.for %i_k = %c0 to %nnz step %c1 {
-      %i = memref.load %b_coord_0[%i_k] : memref<?xindex>
-      %k = memref.load %b_coord_1[%i_k] : memref<?xindex>
-      %l = memref.load %b_coord_2[%i_k] : memref<?xindex>
-      %b_i_k_l = memref.load %b_values[%i_k] : memref<?xf64>
+  %c50 = arith.constant 50 : index
+  %c100 = arith.constant 100 : index
+  scf.parallel (%x) = (%c0) to (%c50) step (%c1) {
+    scf.parallel (%y) = (%c0) to (%c100) step (%c1) {
+      %j0 = arith.muli %x, %c100 : index
+      %j = arith.addi %j0, %y : index
 
-      %a_i_j = memref.load %a[%i, %j] : memref<?x?xf64>
-      %d_l_j = memref.load %d[%l, %j] : memref<?x?xf64>
-      %c_k_j = memref.load %c[%k, %j] : memref<?x?xf64>
-      %0 = arith.mulf %b_i_k_l, %d_l_j : f64
-      %1 = arith.mulf %0, %c_k_j : f64
-      %2 = arith.addf %1, %a_i_j : f64
-      memref.store %2, %a[%i, %j] : memref<?x?xf64>
-    }
-  } {mapping = [{processor = 0, map = affine_map<(d0) -> (d0)>, bound = affine_map<(d0) -> (d0)>}, 
-                {processor = 3, map = affine_map<(d0) -> (d0)>, bound = affine_map<(d0) -> (d0)>}] }
+      scf.for %i_k = %c0 to %nnz step %c1 {
+        %i = memref.load %b_coord_0[%i_k] : memref<?xindex>
+        %k = memref.load %b_coord_1[%i_k] : memref<?xindex>
+        %l = memref.load %b_coord_2[%i_k] : memref<?xindex>
+        %b_i_k_l = memref.load %b_values[%i_k] : memref<?xf64>
+
+        %a_i_j = memref.load %a[%i, %j] : memref<?x?xf64>
+        %d_l_j = memref.load %d[%l, %j] : memref<?x?xf64>
+        %c_k_j = memref.load %c[%k, %j] : memref<?x?xf64>
+        %0 = arith.mulf %b_i_k_l, %d_l_j : f64
+        %1 = arith.mulf %0, %c_k_j : f64
+        %2 = arith.addf %1, %a_i_j : f64
+        memref.store %2, %a[%i, %j] : memref<?x?xf64>
+      }
+    } {mapping = [{processor = 3, map = affine_map<(d0) -> (d0)>, bound = affine_map<(d0) -> (d0)>}]}
+  } {mapping = [{processor = 0, map = affine_map<(d0) -> (d0)>, bound = affine_map<(d0) -> (d0)>}]}
 
   %t_end_mttkrp_coo = call @nanoTime() : () -> i64
   %t_mttkrp_coo = arith.subi %t_end_mttkrp_coo, %t_start_mttkrp_coo: i64
   vector.print %t_mttkrp_coo : i64
 
-  call @printMemrefF64(%cast_a) : (memref<*xf64>) -> ()
+  // call @printMemrefF64(%cast_a) : (memref<*xf64>) -> ()
 
   return
 }
