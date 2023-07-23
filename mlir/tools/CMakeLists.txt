@@ -12,4 +12,5 @@ add_subdirectory(tblgen-lsp-server)
 # mlir-cpu-runner requires ExecutionEngine.
 if(MLIR_ENABLE_EXECUTION_ENGINE)
   add_subdirectory(mlir-cpu-runner)
+  add_subdirectory(jit-calc)
 endif()
