@@ -1,0 +1,69 @@
+# Wasm branch fixtures: outer block, loop, function, if, and nested function label.
+--- !WASM
+FileHeader:
+  Version:         0x1
+Sections:
+  - Type:            TYPE
+    Signatures:
+      - Index:           0
+        ParamTypes:      []
+        ReturnTypes:     [ I32 ]
+      - Index:           1
+        ParamTypes:      [ I32 ]
+        ReturnTypes:     [ I32 ]
+  - Type:            FUNCTION
+    FunctionTypes:   [ 0, 0, 0, 1, 0, 0, 1 ]
+  - Type:            EXPORT
+    Exports:
+      - Name:            outer
+        Kind:            FUNCTION
+        Index:           0
+      - Name:            backedge
+        Kind:            FUNCTION
+        Index:           1
+      - Name:            function_label
+        Kind:            FUNCTION
+        Index:           2
+      - Name:            if_else
+        Kind:            FUNCTION
+        Index:           3
+      - Name:            nested_function_label
+        Kind:            FUNCTION
+        Index:           4
+      - Name:            discard_stack_values
+        Kind:            FUNCTION
+        Index:           5
+      - Name:            branch_before_else
+        Kind:            FUNCTION
+        Index:           6
+  - Type:            CODE
+    Functions:
+      - Index:           0
+        Locals:          []
+        # block i32; block i32; i32.const 42; br 1; end; end; end
+        Body:            027F027F412A0C010B0B0B
+      - Index:           1
+        Locals:          []
+        # i32.const 7; loop typeidx 1; br 0; end; end
+        Body:            410703010C000B0B
+      - Index:           2
+        Locals:          []
+        # i32.const 9; br 0; end
+        Body:            41090C000B
+      - Index:           3
+        Locals:          []
+        # local.get 0; if i32; i32.const 12; else; i32.const 13; br 0; end; end
+        Body:            2000047F410C05410D0C000B0B
+      - Index:           4
+        Locals:          []
+        # block i32; i32.const 10; br 1; end; end
+        Body:            027F410A0C010B0B
+      - Index:           5
+        Locals:          []
+        # block i32; i64.const 1; i32.const 23; br 0; end; end
+        Body:            027F420141170C000B0B
+      - Index:           6
+        Locals:          []
+        # local.get 0; if i32; i32.const 42; br 0; else; i32.const 99; end; end
+        Body:            2000047F412A0C000541E3000B0B
+...

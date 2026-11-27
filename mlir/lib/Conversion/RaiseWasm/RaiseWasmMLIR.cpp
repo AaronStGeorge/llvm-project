@@ -496,8 +496,9 @@ struct WasmFuncOpConversion : OpConversionPattern<FuncOp> {
           ValueRange{});
     }
 
-    inline void convertBranch(BlockReturnOp brOp, Block *dest,
-                              ConversionPatternRewriter &rewriter) {
+    template <typename OpTy>
+    void convertBranch(OpTy brOp, Block *dest,
+                       ConversionPatternRewriter &rewriter) {
       rewriter.replaceOpWithNewOp<cf::BranchOp>(brOp, dest, brOp.getInputs());
     }
 
@@ -532,8 +533,8 @@ struct WasmFuncOpConversion : OpConversionPattern<FuncOp> {
 
     LogicalResult convertBranch(LabelBranchingOpInterface branchOp,
                                 ConversionPatternRewriter &rewriter) {
-      return convertBranchDispatch<BlockReturnOp, BranchIfOp>(branchOp,
-                                                              rewriter);
+      return convertBranchDispatch<BlockReturnOp, BranchOp, BranchIfOp>(
+          branchOp, rewriter);
     }
 
     func::FuncOp func;

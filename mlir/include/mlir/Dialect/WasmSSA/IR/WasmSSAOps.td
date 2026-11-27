@@ -107,6 +107,19 @@ def WasmSSA_BlockReturnOp : WasmSSA_Op<"block_return", [Terminator,
   let assemblyFormat = "($inputs^ `:` type($inputs))? attr-dict";
 }
 
+def WasmSSA_BranchOp : WasmSSA_Op<"branch", [
+    Terminator, DeclareOpInterfaceMethods<LabelBranchingOpInterface>]> {
+  let summary = "Unconditionally jump to an enclosing label";
+  let description = [{
+    Jump to the enclosing label at the given depth, passing any branch operands.
+    Depth zero denotes the innermost label. A loop label targets the loop's
+    entry; a block or if label targets its continuation.
+  }];
+  let arguments = (ins UI32Attr: $exitLevel, Variadic<WasmSSA_ValType>: $inputs);
+  let assemblyFormat = "`to` `level` $exitLevel (`with` `args` `(` $inputs^ `:` type($inputs) `)`)? attr-dict";
+  let hasVerifier = 1;
+}
+
 def WasmSSA_BranchIfOp : WasmSSA_Op<"branch_if", [
     Terminator,
     DeclareOpInterfaceMethods<LabelBranchingOpInterface>]> {

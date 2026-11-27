@@ -115,6 +115,18 @@ Block *BlockReturnOp::getTarget() {
 }
 
 //===----------------------------------------------------------------------===//
+// BranchOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult BranchOp::verify() {
+  auto branch = cast<LabelBranchingOpInterface>(getOperation());
+  if (!llvm::equal(getInputs().getTypes(),
+                   branch.getTarget()->getArgumentTypes()))
+    return emitOpError("operand types do not match the target label types");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // ExtendLowBitsSOp
 //===----------------------------------------------------------------------===//
 

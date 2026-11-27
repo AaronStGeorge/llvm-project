@@ -408,7 +408,7 @@ public:
       auto bodyParsingRes = exprParser.parse(builder, parseEndBytes);
       if (failed(bodyParsingRes))
         return failure();
-      // An explicit return already terminates the current block.
+      // Add a fallthrough terminator only if the current block needs one.
       Block *exitBlock = builder.getBlock();
       if (!exitBlock->mightHaveTerminator()) {
         auto returnOperands = exprParser.popOperands(resTypes);
@@ -758,7 +758,8 @@ public:
     if (!cParser.end())
       return emitError(cParser.getLocation(),
                        "unparsed garbage remaining at end of code block");
-    // An explicit return already terminates the current block.
+    // An explicit return or a br targeting the implicit function label
+    // already terminates the current block.
     Block *exitBlock = builder.getBlock();
     if (!exitBlock->mightHaveTerminator())
       ReturnOp::create(builder, func->getLoc(), *res);
@@ -1106,6 +1107,39 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::ifOpCode>,
   }
   builder.setInsertionPointToStart(successor);
   return ParsedInstruction{SmallVector<Value>(successor->getArguments())};
+}
+
+parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::branch>,
+                    OpBuilder &builder,
+                    ExpressionParser::ExprParserProxy &exprParser) {
+  auto depth = exprParser.parser().parseLiteral<uint32_t>();
+  if (failed(depth))
+    return failure();
+  Location loc = exprParser.getCurrentOpLoc();
+  Operation *target = builder.getBlock()->getParentOp();
+  for (uint32_t i = 0; i < *depth; ++i) {
+    if (!isa<LabelLevelOpInterface>(target))
+      return emitError(loc, "invalid branch label depth: ") << *depth;
+    target = target->getParentOp();
+  }
+  auto func = dyn_cast<FuncOp>(target);
+  auto label = dyn_cast<LabelLevelOpInterface>(target);
+  if (!func && !label)
+    return emitError(loc, "invalid branch label depth: ") << *depth;
+
+  TypeRange inputTypes =
+      func ? TypeRange(func.getResultTypes())
+           : TypeRange(label.getLabelTarget()->getArgumentTypes());
+  auto branchArgs = exprParser.popOperands(inputTypes);
+  if (failed(branchArgs))
+    return failure();
+
+  if (func)
+    ReturnOp::create(builder, loc, *branchArgs);
+  else
+    BranchOp::create(builder, loc, builder.getUI32IntegerAttr(*depth),
+                     *branchArgs);
+  return ParsedInstruction{{}, InstructionFlow::NoFallthrough};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::branchIf>,
