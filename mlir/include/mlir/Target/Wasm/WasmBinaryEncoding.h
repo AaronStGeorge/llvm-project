@@ -25,6 +25,7 @@ struct WasmBinaryEncoding {
     static constexpr std::byte ifOpCode{0x04};
     static constexpr std::byte elseOpCode{0x05};
     static constexpr std::byte branchIf{0x0D};
+    static constexpr std::byte returnOpCode{0x0F};
     static constexpr std::byte call{0x10};
 
     // Locals, globals, constants.

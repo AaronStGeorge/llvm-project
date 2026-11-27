@@ -140,7 +140,16 @@ struct FunctionSymbolRefContainer : SymbolRefContainer {
 using ImportDesc =
     std::variant<TypeIdxRecord, TableType, LimitType, GlobalTypeRecord>;
 
-using parsed_inst_t = FailureOr<SmallVector<Value>>;
+using parsed_values_t = FailureOr<SmallVector<Value>>;
+
+enum class InstructionFlow { FallsThrough, NoFallthrough };
+
+struct ParsedInstruction {
+  SmallVector<Value> results;
+  InstructionFlow flow = InstructionFlow::FallsThrough;
+};
+
+using parsed_inst_t = FailureOr<ParsedInstruction>;
 
 struct EmptyBlockMarker {};
 using BlockTypeParseResult =
@@ -206,8 +215,7 @@ public:
   /// location
   ///   if an error occurs.
   /// @return Failure or the vector of popped values.
-  FailureOr<SmallVector<Value>> popOperands(TypeRange operandTypes,
-                                            Location *opLoc);
+  parsed_values_t popOperands(TypeRange operandTypes, Location *opLoc);
 
   /// Push the results of an operation to the stack so they can be used in a
   /// following operation.
@@ -341,7 +349,7 @@ private:
 
 public:
   template <std::byte ParseEndByte = WasmBinaryEncoding::endByte>
-  parsed_inst_t parse(OpBuilder &builder, UniqueByte<ParseEndByte> = {});
+  parsed_values_t parse(OpBuilder &builder, UniqueByte<ParseEndByte> = {});
 
   template <std::byte... ExpressionParseEnd>
   FailureOr<ParseResultWithInfo>
@@ -352,7 +360,7 @@ public:
     return NestingContextGuard{*this, levelOp};
   }
 
-  FailureOr<llvm::SmallVector<Value>> popOperands(TypeRange operandTypes) {
+  parsed_values_t popOperands(TypeRange operandTypes) {
     return valueStack.popOperands(operandTypes, &currentOpLoc.value());
   }
 
@@ -400,10 +408,14 @@ public:
       auto bodyParsingRes = exprParser.parse(builder, parseEndBytes);
       if (failed(bodyParsingRes))
         return failure();
-      auto returnOperands = exprParser.popOperands(resTypes);
-      if (failed(returnOperands))
-        return failure();
-      BlockReturnOp::create(builder, opLoc, *returnOperands);
+      // An explicit return already terminates the current block.
+      Block *exitBlock = builder.getBlock();
+      if (!exitBlock->mightHaveTerminator()) {
+        auto returnOperands = exprParser.popOperands(resTypes);
+        if (failed(returnOperands))
+          return failure();
+        BlockReturnOp::create(builder, opLoc, *returnOperands);
+      }
       LDBG() << "end of parsing of a block";
       return bodyParsingRes->endingByte;
     }
@@ -689,9 +701,9 @@ public:
     }
   }
 
-  parsed_inst_t parseExpression(OpBuilder &builder,
-                                WasmModuleSymbolTables const &symbols,
-                                ArrayRef<local_val_t> locals = {}) {
+  parsed_values_t parseExpression(OpBuilder &builder,
+                                  WasmModuleSymbolTables const &symbols,
+                                  ArrayRef<local_val_t> locals = {}) {
     auto eParser = ExpressionParser{*this, symbols, locals};
     return eParser.parse(builder);
   }
@@ -721,7 +733,8 @@ public:
     FailureOr<uint32_t> localVecSize = cParser.parseVectorSize();
     if (failed(localVecSize))
       return failure();
-    OpBuilder builder{&func.getBody().front().back()};
+    returnOp->erase();
+    OpBuilder builder = OpBuilder::atBlockEnd(&block);
     for (auto arg : block.getArguments())
       locals.push_back(cast<TypedValue<LocalRefType>>(arg));
     // Declare the local ops
@@ -739,14 +752,16 @@ public:
         locals.push_back(local.getResult());
       }
     }
-    parsed_inst_t res = cParser.parseExpression(builder, symbols, locals);
+    parsed_values_t res = cParser.parseExpression(builder, symbols, locals);
     if (failed(res))
       return failure();
     if (!cParser.end())
       return emitError(cParser.getLocation(),
                        "unparsed garbage remaining at end of code block");
-    ReturnOp::create(builder, func->getLoc(), *res);
-    returnOp->erase();
+    // An explicit return already terminates the current block.
+    Block *exitBlock = builder.getBlock();
+    if (!exitBlock->mightHaveTerminator())
+      ReturnOp::create(builder, func->getLoc(), *res);
     return success();
   }
 
@@ -923,7 +938,8 @@ void ValueStack::dump() const {
 }
 #endif
 
-parsed_inst_t ValueStack::popOperands(TypeRange operandTypes, Location *opLoc) {
+parsed_values_t ValueStack::popOperands(TypeRange operandTypes,
+                                        Location *opLoc) {
   LDBG() << "Popping from ValueStack\n"
          << "  Elements(s) to pop: " << operandTypes.size() << "\n"
          << "  Current stack size: " << values.size();
@@ -966,8 +982,8 @@ LogicalResult ValueStack::pushResults(ValueRange results, Location *opLoc) {
 }
 
 template <std::byte EndParseByte>
-parsed_inst_t ExpressionParser::parse(OpBuilder &builder,
-                                      UniqueByte<EndParseByte> endByte) {
+parsed_values_t ExpressionParser::parse(OpBuilder &builder,
+                                        UniqueByte<EndParseByte> endByte) {
   auto res = parse(builder, ByteSequence<EndParseByte>{});
   if (failed(res))
     return failure();
@@ -978,20 +994,22 @@ template <std::byte... ExpressionParseEnd>
 FailureOr<ExpressionParser::ParseResultWithInfo>
 ExpressionParser::parse(OpBuilder &builder,
                         ByteSequence<ExpressionParseEnd...> parsingEndFilters) {
-  SmallVector<Value> res;
+  ParsedInstruction last;
   for (;;) {
     currentOpLoc = parser.getLocation();
     FailureOr<std::byte> opCode = parser.consumeByte();
     if (failed(opCode))
       return failure();
     if (isValueOneOf(*opCode, parsingEndFilters))
-      return {{res, *opCode}};
-    parsed_inst_t resParsed;
-    resParsed = dispatchToInstParser(*opCode, builder);
-    if (failed(resParsed))
+      return {{std::move(last.results), *opCode}};
+    if (last.flow == InstructionFlow::NoFallthrough)
+      return emitError(*currentOpLoc,
+                       "unreachable instructions are not supported");
+    parsed_inst_t parsed = dispatchToInstParser(*opCode, builder);
+    if (failed(parsed))
       return failure();
-    std::swap(res, *resParsed);
-    if (failed(pushResults(res)))
+    last = std::move(*parsed);
+    if (failed(pushResults(last.results)))
       return failure();
   }
 }
@@ -1028,7 +1046,7 @@ ExpressionParser::ExprParserProxy::parseBlockLikeOp(OpBuilder &builder) {
   if (failed(parseBlockContent(builder, blockBody, resTypes, opLoc, blockOp)))
     return failure();
   builder.setInsertionPointToStart(successor);
-  return {ValueRange{successor->getArguments()}};
+  return ParsedInstruction{SmallVector<Value>(successor->getArguments())};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::block>,
@@ -1087,7 +1105,7 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::ifOpCode>,
       return failure();
   }
   builder.setInsertionPointToStart(successor);
-  return {ValueRange{successor->getArguments()}};
+  return ParsedInstruction{SmallVector<Value>(successor->getArguments())};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::branchIf>,
@@ -1116,7 +1134,21 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::branchIf>,
                      builder.getUI32IntegerAttr(*level), *branchArgs,
                      elseBlock);
   builder.setInsertionPointToStart(elseBlock);
-  return {*branchArgs};
+  return ParsedInstruction{std::move(*branchArgs)};
+}
+
+parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::returnOpCode>,
+                    OpBuilder &builder,
+                    ExpressionParser::ExprParserProxy &exprParser) {
+  Location loc = exprParser.getCurrentOpLoc();
+  FuncOp func = builder.getBlock()->getParent()->getParentOfType<FuncOp>();
+  if (!func)
+    return emitError(loc, "'return' must be inside a function");
+  auto operands = exprParser.popOperands(func.getResultTypes());
+  if (failed(operands))
+    return failure();
+  ReturnOp::create(builder, loc, *operands);
+  return ParsedInstruction{{}, InstructionFlow::NoFallthrough};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::call>,
@@ -1131,12 +1163,12 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::call>,
   auto callee = exprParser.symbols().funcSymbols[*funcIdx];
   llvm::ArrayRef<Type> inTypes = callee.functionType.getInputs();
   llvm::ArrayRef<Type> resTypes = callee.functionType.getResults();
-  parsed_inst_t inOperands = exprParser.popOperands(inTypes);
+  parsed_values_t inOperands = exprParser.popOperands(inTypes);
   if (failed(inOperands))
     return failure();
   auto callOp =
       FuncCallOp::create(builder, loc, resTypes, callee.symbol, *inOperands);
-  return {callOp.getResults()};
+  return ParsedInstruction{SmallVector<Value>(callOp.getResults())};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::localGet>,
@@ -1150,8 +1182,8 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::localGet>,
     return emitError(instLoc, "invalid local index. function has ")
            << exprParser.locals().size()
            << " accessible locals, received index " << *id;
-  return {{LocalGetOp::create(builder, instLoc, exprParser.locals()[*id])
-               .getResult()}};
+  auto localOp = LocalGetOp::create(builder, instLoc, exprParser.locals()[*id]);
+  return ParsedInstruction{{localOp.getResult()}};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::globalGet>,
@@ -1169,7 +1201,7 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::globalGet>,
   auto globalOp = GlobalGetOp::create(builder, instLoc, globalVar.globalType,
                                       globalVar.symbol);
 
-  return {{globalOp.getResult()}};
+  return ParsedInstruction{{globalOp.getResult()}};
 }
 
 template <typename OpToCreate>
@@ -1185,12 +1217,13 @@ parsed_inst_t ExpressionParser::parseSetOrTee(OpBuilder &builder) {
         *currentOpLoc,
         "invalid stack access, trying to access a value on an empty stack");
 
-  parsed_inst_t poppedOp = popOperands(locals[*id].getType().getElementType());
+  parsed_values_t poppedOp =
+      popOperands(locals[*id].getType().getElementType());
   if (failed(poppedOp))
     return failure();
-  return {
-      OpToCreate::create(builder, *currentOpLoc, locals[*id], poppedOp->front())
-          ->getResults()};
+  auto op = OpToCreate::create(builder, *currentOpLoc, locals[*id],
+                               poppedOp->front());
+  return ParsedInstruction{SmallVector<Value>(op->getResults())};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::localSet>,
@@ -1270,7 +1303,7 @@ parsed_inst_t ExpressionParser::ExprParserProxy::parseConstInst(
   auto constOp =
       ConstOp::create(builder, getCurrentOpLoc(),
                       buildLiteralAttr<valueT>(builder, *parsedConstant));
-  return {{constOp.getResult()}};
+  return ParsedInstruction{{constOp.getResult()}};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::constI32>,
@@ -1311,7 +1344,7 @@ inline parsed_inst_t ExpressionParser::ExprParserProxy::buildNumericOp(
     return failure();
   auto op = opcode::create(builder, getCurrentOpLoc(), *operands).getResult();
   LDBG() << "Built operation: " << op;
-  return {{op}};
+  return ParsedInstruction{{op}};
 }
 
 // Convenience macro for generating numerical operations.
@@ -1418,7 +1451,7 @@ ExpressionParser::ExprParserProxy::buildConvertOp(OpBuilder &builder,
   auto op = opType::create(builder, getCurrentOpLoc(), outType,
                            operand->front(), extraArgs...);
   LDBG() << "Built operation: " << op;
-  return {{op.getResult()}};
+  return ParsedInstruction{{op.getResult()}};
 }
 
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::demoteF64ToF32>,
@@ -1490,7 +1523,7 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::saturatedTruncate>,
                       : TruncSatSIOp::create(builder, parser.getCurrentOpLoc(),
                                              destType, srcOp->front());
   LDBG() << "Built operation: " << op;
-  return {{op->getResult(0)}};
+  return ParsedInstruction{{op->getResult(0)}};
 }
 
 #define BUILD_SLICE_EXTEND_PARSER(IT_WIDTH, EXTRACT_WIDTH)                     \
@@ -2104,7 +2137,7 @@ WasmBinaryParser::parseSectionItem<WasmSectionType::GLOBAL>(ParserHead &ph,
   OpBuilder::InsertionGuard guard{builder};
   Block *block = builder.createBlock(&globalOp.getInitializer());
   builder.setInsertionPointToStart(block);
-  parsed_inst_t expr = ph.parseExpression(builder, symbols);
+  parsed_values_t expr = ph.parseExpression(builder, symbols);
   if (failed(expr))
     return failure();
   if (block->empty())
