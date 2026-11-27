@@ -18,6 +18,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Location.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Target/Wasm/WasmBinaryEncoding.h"
 #include "mlir/Target/Wasm/WasmImporter.h"
@@ -430,6 +431,8 @@ public:
     inline auto &symbols() { return exprParser.symbols; }
 
     inline auto &locals() { return exprParser.locals; }
+
+    bool isDiscarding() const { return exprParser.discardDepth != 0; }
 
     template <typename OpToCreate>
     parsed_inst_t parseSetOrTee(OpBuilder &builder) {
@@ -1154,6 +1157,26 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::ifOpCode>,
   return ParsedInstruction{SmallVector<Value>(successor->getArguments())};
 }
 
+static FailureOr<Operation *> resolveBranchTarget(Block *block, uint32_t depth,
+                                                 Location loc) {
+  Operation *target = block->getParentOp();
+  for (uint32_t i = 0; i < depth; ++i) {
+    if (!isa_and_nonnull<LabelLevelOpInterface>(target))
+      return emitError(loc, "invalid branch label depth: ") << depth;
+    target = target->getParentOp();
+  }
+  if (!isa_and_nonnull<FuncOp, LabelLevelOpInterface>(target))
+    return emitError(loc, "invalid branch label depth: ") << depth;
+  return target;
+}
+
+static TypeRange getBranchTargetTypes(Operation *target) {
+  if (auto func = dyn_cast<FuncOp>(target))
+    return func.getResultTypes();
+  return cast<LabelLevelOpInterface>(target)
+      .getLabelTarget()->getArgumentTypes();
+}
+
 parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::branch>,
                     OpBuilder &builder,
                     ExpressionParser::ExprParserProxy &exprParser) {
@@ -1161,25 +1184,15 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::branch>,
   if (failed(depth))
     return failure();
   Location loc = exprParser.getCurrentOpLoc();
-  Operation *target = builder.getBlock()->getParentOp();
-  for (uint32_t i = 0; i < *depth; ++i) {
-    if (!isa<LabelLevelOpInterface>(target))
-      return emitError(loc, "invalid branch label depth: ") << *depth;
-    target = target->getParentOp();
-  }
-  auto func = dyn_cast<FuncOp>(target);
-  auto label = dyn_cast<LabelLevelOpInterface>(target);
-  if (!func && !label)
-    return emitError(loc, "invalid branch label depth: ") << *depth;
-
-  TypeRange inputTypes =
-      func ? TypeRange(func.getResultTypes())
-           : TypeRange(label.getLabelTarget()->getArgumentTypes());
+  auto target = resolveBranchTarget(builder.getBlock(), *depth, loc);
+  if (failed(target))
+    return failure();
+  TypeRange inputTypes = getBranchTargetTypes(*target);
   auto branchArgs = exprParser.popOperands(inputTypes);
   if (failed(branchArgs))
     return failure();
 
-  if (func)
+  if (isa<FuncOp>(*target))
     ReturnOp::create(builder, loc, *branchArgs);
   else
     BranchOp::create(builder, loc, builder.getUI32IntegerAttr(*depth),
@@ -1193,25 +1206,32 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::branchIf>,
   auto level = exprParser.parser().parseLiteral<uint32_t>();
   if (failed(level))
     return failure();
+  Location loc = exprParser.getCurrentOpLoc();
   Block *curBlock = builder.getBlock();
-  Region *curRegion = curBlock->getParent();
-  auto sip = builder.saveInsertionPoint();
-  Block *elseBlock = builder.createBlock(curRegion, curRegion->end());
+  auto target = resolveBranchTarget(curBlock, *level, loc);
+  if (failed(target))
+    return failure();
+  bool targetsFunction = isa<FuncOp>(*target);
+  if (targetsFunction && !exprParser.isDiscarding())
+    return emitError(loc, "live 'br_if' to the function label is not supported");
+
   auto condition = exprParser.popOperands(builder.getI32Type());
   if (failed(condition))
     return failure();
-  builder.restoreInsertionPoint(sip);
-  auto targetOp =
-      LabelBranchingOpInterface::getTargetOpFromBlock(curBlock, *level);
-  if (failed(targetOp))
-    return failure();
-  auto inputTypes = targetOp->getLabelTarget()->getArgumentTypes();
-  auto branchArgs = exprParser.popOperands(inputTypes);
+  auto branchArgs = exprParser.popOperands(getBranchTargetTypes(*target));
   if (failed(branchArgs))
     return failure();
-  BranchIfOp::create(builder, exprParser.getCurrentOpLoc(), condition->front(),
-                     builder.getUI32IntegerAttr(*level), *branchArgs,
-                     elseBlock);
+  // No WasmSSA op models a conditional return. In discarded code, checking
+  // the operands and restoring the label arguments on fallthrough suffices.
+  if (targetsFunction)
+    return ParsedInstruction{std::move(*branchArgs)};
+
+  Region *curRegion = curBlock->getParent();
+  auto sip = builder.saveInsertionPoint();
+  Block *elseBlock = builder.createBlock(curRegion, curRegion->end());
+  builder.restoreInsertionPoint(sip);
+  BranchIfOp::create(builder, loc, condition->front(),
+                     builder.getUI32IntegerAttr(*level), *branchArgs, elseBlock);
   builder.setInsertionPointToStart(elseBlock);
   return ParsedInstruction{std::move(*branchArgs)};
 }
@@ -1923,23 +1943,14 @@ private:
     return giOp.verify();
   }
 
-  // Detect occurence of errors
-  LogicalResult peekDiag(Diagnostic &diag) {
-    if (diag.getSeverity() == DiagnosticSeverity::Error)
-      isValid = false;
-    return failure();
-  }
-
 public:
-  WasmBinaryParser(llvm::SourceMgr &sourceMgr, MLIRContext *ctx)
-      : builder{ctx}, ctx{ctx} {
-    ctx->getDiagEngine().registerHandler(
-        [this](Diagnostic &diag) { return peekDiag(diag); });
+  explicit WasmBinaryParser(MLIRContext *ctx) : builder{ctx}, ctx{ctx} {}
+
+  LogicalResult parse(llvm::SourceMgr &sourceMgr) {
     ctx->loadAllAvailableDialects();
-    if (sourceMgr.getNumBuffers() != 1) {
-      emitError(UnknownLoc::get(ctx), "one source file should be provided");
-      return;
-    }
+    if (sourceMgr.getNumBuffers() != 1)
+      return emitError(UnknownLoc::get(ctx),
+                       "one source file should be provided");
     uint32_t sourceBufId = sourceMgr.getMainFileID();
     StringRef source = sourceMgr.getMemoryBuffer(sourceBufId)->getBuffer();
     srcName = StringAttr::get(
@@ -1949,60 +1960,36 @@ public:
     auto const wasmHeader = StringRef{"\0asm", 4};
     FileLineColLoc magicLoc = parser.getLocation();
     FailureOr<StringRef> magic = parser.consumeNBytes(wasmHeader.size());
-    if (failed(magic) || magic->compare(wasmHeader)) {
-      emitError(magicLoc, "source file does not contain valid Wasm header");
-      return;
-    }
+    if (failed(magic) || magic->compare(wasmHeader))
+      return emitError(magicLoc,
+                       "source file does not contain valid Wasm header");
     auto const expectedVersionString = StringRef{"\1\0\0\0", 4};
     FileLineColLoc versionLoc = parser.getLocation();
     FailureOr<StringRef> version =
         parser.consumeNBytes(expectedVersionString.size());
     if (failed(version))
-      return;
-    if (version->compare(expectedVersionString)) {
-      emitError(versionLoc,
-                "unsupported Wasm version. only version 1 is supported");
-      return;
-    }
-    LogicalResult fillRegistry = registry.populateFromBody(parser.copy());
-    if (failed(fillRegistry))
-      return;
+      return failure();
+    if (version->compare(expectedVersionString))
+      return emitError(versionLoc,
+                       "unsupported Wasm version. only version 1 is supported");
+    if (failed(registry.populateFromBody(parser.copy())))
+      return failure();
 
     mOp = ModuleOp::create(builder, getLocation());
-    builder.setInsertionPointToStart(&mOp.getBodyRegion().front());
-    LogicalResult parsingTypes = parseSection<WasmSectionType::TYPE>();
-    if (failed(parsingTypes))
-      return;
-
-    LogicalResult parsingImports = parseSection<WasmSectionType::IMPORT>();
-    if (failed(parsingImports))
-      return;
+    builder.setInsertionPointToStart(&mOp->getBodyRegion().front());
+    if (failed(parseSection<WasmSectionType::TYPE>()) ||
+        failed(parseSection<WasmSectionType::IMPORT>()))
+      return failure();
 
     firstInternalFuncID = symbols.funcSymbols.size();
 
-    LogicalResult parsingFunctions = parseSection<WasmSectionType::FUNCTION>();
-    if (failed(parsingFunctions))
-      return;
-
-    LogicalResult parsingTables = parseSection<WasmSectionType::TABLE>();
-    if (failed(parsingTables))
-      return;
-
-    LogicalResult parsingMems = parseSection<WasmSectionType::MEMORY>();
-    if (failed(parsingMems))
-      return;
-
-    LogicalResult parsingGlobals = parseSection<WasmSectionType::GLOBAL>();
-    if (failed(parsingGlobals))
-      return;
-
-    LogicalResult parsingCode = parseSection<WasmSectionType::CODE>();
-    if (failed(parsingCode))
-      return;
-
-    LogicalResult parsingExports = parseSection<WasmSectionType::EXPORT>();
-    if (failed(parsingExports))
-      return;
+    if (failed(parseSection<WasmSectionType::FUNCTION>()) ||
+        failed(parseSection<WasmSectionType::TABLE>()) ||
+        failed(parseSection<WasmSectionType::MEMORY>()) ||
+        failed(parseSection<WasmSectionType::GLOBAL>()) ||
+        failed(parseSection<WasmSectionType::CODE>()) ||
+        failed(parseSection<WasmSectionType::EXPORT>()))
+      return failure();
 
     // Copy over sizes of containers into statistics.
     LDBG() << "WASM Imports:"
@@ -2011,25 +1998,19 @@ public:
            << " - Num globals: " << symbols.globalSymbols.size() << "\n"
            << " - Num memories: " << symbols.memSymbols.size() << "\n"
            << " - Num tables: " << symbols.tableSymbols.size();
+    return success();
   }
 
-  ModuleOp getModule() {
-    if (isValid)
-      return mOp;
-    if (mOp)
-      mOp.erase();
-    return ModuleOp{};
-  }
+  OwningOpRef<ModuleOp> takeModule() { return std::move(mOp); }
 
 private:
   mlir::StringAttr srcName;
   OpBuilder builder;
   WasmModuleSymbolTables symbols;
   MLIRContext *ctx;
-  ModuleOp mOp;
+  OwningOpRef<ModuleOp> mOp;
   SectionRegistry registry;
   size_t firstInternalFuncID{0};
-  bool isValid{true};
 };
 
 template <>
@@ -2119,10 +2100,10 @@ WasmBinaryParser::parseSectionItem<WasmSectionType::EXPORT>(ParserHead &ph,
   if (failed(currentSymbol))
     return failure();
 
-  Operation *op = SymbolTable::lookupSymbolIn(mOp, *currentSymbol);
+  Operation *op = SymbolTable::lookupSymbolIn(*mOp, *currentSymbol);
   op->setAttr("exported", UnitAttr::get(op->getContext()));
   StringAttr symName = SymbolTable::getSymbolName(op);
-  return SymbolTable{mOp}.rename(symName, *exportName);
+  return SymbolTable{*mOp}.rename(symName, *exportName);
 }
 
 template <>
@@ -2224,7 +2205,7 @@ LogicalResult WasmBinaryParser::parseSectionItem<WasmSectionType::CODE>(
   unsigned long funcId = innerFunctionId + firstInternalFuncID;
   FunctionSymbolRefContainer symRef = symbols.funcSymbols[funcId];
   auto funcOp =
-      dyn_cast<FuncOp>(SymbolTable::lookupSymbolIn(mOp, symRef.symbol));
+      dyn_cast<FuncOp>(SymbolTable::lookupSymbolIn(*mOp, symRef.symbol));
   assert(funcOp);
   if (failed(ph.parseCodeFor(funcOp, symbols)))
     return failure();
@@ -2235,11 +2216,19 @@ LogicalResult WasmBinaryParser::parseSectionItem<WasmSectionType::CODE>(
 namespace mlir::wasm {
 OwningOpRef<ModuleOp> importWebAssemblyToModule(llvm::SourceMgr &source,
                                                 MLIRContext *context) {
-  WasmBinaryParser wBN{source, context};
-  ModuleOp mOp = wBN.getModule();
-  if (mOp)
-    return {mOp};
-
-  return {nullptr};
+  WasmBinaryParser parser(context);
+  bool sawError = false;
+  ScopedDiagnosticHandler handler(context, [&](Diagnostic &diag) {
+    sawError |= diag.getSeverity() == DiagnosticSeverity::Error;
+    return failure(); // Let the enclosing driver display the diagnostic.
+  });
+  if (failed(parser.parse(source))) {
+    if (!sawError)
+      emitError(UnknownLoc::get(context), "failed to parse Wasm module");
+    return {};
+  }
+  if (sawError)
+    return {};
+  return parser.takeModule();
 }
 } // namespace mlir::wasm

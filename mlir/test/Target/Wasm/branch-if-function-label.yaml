@@ -1,0 +1,110 @@
+# Validate discarded br_if to the implicit function label without lowering it.
+# RUN: split-file %s %t
+# RUN: yaml2obj %t/valid.yaml -o - | mlir-translate --import-wasm | FileCheck %s --check-prefix=VALID
+# RUN: yaml2obj %t/depth.yaml -o - | not mlir-translate --import-wasm > %t/stdout 2> %t/stderr
+# RUN: count 0 < %t/stdout
+# RUN: FileCheck %s --check-prefix=DEPTH < %t/stderr
+# RUN: yaml2obj %t/type.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=TYPE
+# RUN: yaml2obj %t/resumption.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=RESUME
+# RUN: yaml2obj %t/live.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=LIVE
+
+# VALID-LABEL: wasmssa.func exported @probe() -> (i32, i64) {
+# VALID-NEXT:    %[[LO:.*]] = wasmssa.const 7 : i32
+# VALID-NEXT:    %[[HI:.*]] = wasmssa.const 9 : i64
+# VALID-NEXT:    wasmssa.return %[[LO]], %[[HI]] : i32, i64
+# VALID-NEXT:  }
+# VALID-NEXT:  wasmssa.func exported @after() -> i32 {
+# VALID-NEXT:    %[[AFTER:.*]] = wasmssa.const 42 : i32
+# VALID-NEXT:    wasmssa.return %[[AFTER]] : i32
+# VALID-NEXT:  }
+# VALID-NEXT: }
+# DEPTH: error: invalid branch label depth: 1
+# TYPE: error: invalid operand type on stack. expecting 'i64', value on stack is of type 'i32'
+# RESUME: error: invalid operand type on stack. expecting 'i32', value on stack is of type 'i64'
+# LIVE: error: live 'br_if' to the function label is not supported
+
+#--- valid.yaml
+# (func (export "probe") (result i32 i64)
+#   i32.const 7 i64.const 9 return
+#   i32.const 10 i64.const 11 i32.const 0 br_if 0 i64.const 1 i64.add)
+# (func (export "after") (result i32) i32.const 42)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32, I64]}
+      - {Index: 1, ParamTypes: [], ReturnTypes: [I32]}
+  - Type: FUNCTION
+    FunctionTypes: [0, 1]
+  - Type: EXPORT
+    Exports:
+      - {Name: probe, Kind: FUNCTION, Index: 0}
+      - {Name: after, Kind: FUNCTION, Index: 1}
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 410742090F410A420B41000D0042017C0B}
+      - {Index: 1, Locals: [], Body: 412A0B}
+
+#--- depth.yaml
+# (func (export "probe") return i32.const 0 br_if 1)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: []}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: EXPORT
+    Exports:
+      - {Name: probe, Kind: FUNCTION, Index: 0}
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 0F41000D010B}
+
+#--- type.yaml
+# (func (result i32 i64) i32.const 7 i64.const 9 return
+#   i32.const 10 i32.const 11 i32.const 0 br_if 0)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32, I64]}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 410742090F410A410B41000D000B}
+
+#--- resumption.yaml
+# br_if must push the label arguments back on fallthrough, even when it gets
+# them from the polymorphic frame floor. i32.add sees the concrete i64 type.
+# (func (result i32 i64) i32.const 7 i64.const 9 return
+#   i32.const 0 br_if 0 i32.add)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32, I64]}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 410742090F41000D006A0B}
+
+#--- live.yaml
+# (func i32.const 0 br_if 0) is valid Wasm but still has no live lowering.
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: []}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 41000D000B}
