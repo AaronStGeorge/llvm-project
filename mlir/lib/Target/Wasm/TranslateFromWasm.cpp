@@ -21,6 +21,7 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Target/Wasm/WasmBinaryEncoding.h"
 #include "mlir/Target/Wasm/WasmImporter.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/DebugLog.h"
 #include "llvm/Support/Endian.h"
@@ -28,6 +29,7 @@
 #include "llvm/Support/LEB128.h"
 #include "llvm/Support/LogicalResult.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -95,10 +97,6 @@ constexpr bool sectionShouldBeUnique(WasmSectionType secType) {
 
 template <std::byte... Bytes>
 struct ByteSequence {};
-
-/// Template class for representing a byte sequence of only one byte
-template <std::byte Byte>
-struct UniqueByte : ByteSequence<Byte> {};
 
 [[maybe_unused]] constexpr ByteSequence<
     WasmBinaryEncoding::Type::i32, WasmBinaryEncoding::Type::i64,
@@ -192,20 +190,19 @@ class ParserHead;
 /// Wrapper around SmallVector to only allow access as push and pop on the
 /// stack. Makes sure that there are no "free accesses" on the stack to preserve
 /// its state.
-/// This class also keep tracks of the Wasm labels defined by different ops,
-/// which can be targeted by control flow ops. This can be modeled as part of
-/// the Value Stack as Wasm control flow ops can only target enclosing labels.
+/// Each control frame bounds operand pops, even in unreachable code.
 class ValueStack {
 private:
-  struct LabelLevel {
+  struct Frame {
     size_t stackIdx;
-    LabelLevelOpInterface levelOp;
+    // Non-null only after a no-fallthrough instruction in this frame.
+    Block *placeholderBlock = nullptr;
   };
 
 public:
-  bool empty() const { return values.empty(); }
-
   size_t size() const { return values.size(); }
+
+  size_t frameSize() const { return values.size() - frames.back().stackIdx; }
 
   /// Pops values from the stack because they are being used in an operation.
   /// @param operandTypes The list of expected types of the operation, used
@@ -225,15 +222,18 @@ public:
   ///   if an error occurs.
   LogicalResult pushResults(ValueRange results, Location *opLoc);
 
-  void addLabelLevel(LabelLevelOpInterface levelOp) {
-    labelLevel.push_back({values.size(), levelOp});
-    LDBG() << "Adding a new frame context to ValueStack";
+  void pushFrame() { frames.push_back({values.size()}); }
+
+  void popFrame() {
+    assert(frames.size() > 1 && "cannot pop the implicit outer frame");
+    resetFrame();
+    frames.pop_back();
   }
 
-  void dropLabelLevel() {
-    assert(!labelLevel.empty() && "Trying to drop a frame from empty context");
-    auto newSize = labelLevel.pop_back_val().stackIdx;
-    values.truncate(newSize);
+  void resetFrame(Block *placeholderBlock = nullptr) {
+    Frame &frame = frames.back();
+    values.truncate(frame.stackIdx);
+    frame.placeholderBlock = placeholderBlock;
   }
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   /// A simple dump function for debugging.
@@ -243,7 +243,7 @@ public:
 
 private:
   SmallVector<Value> values;
-  SmallVector<LabelLevel> labelLevel;
+  SmallVector<Frame> frames{{0}};
 };
 
 using local_val_t = TypedValue<wasmssa::LocalRefType>;
@@ -279,31 +279,33 @@ private:
   /// RAII guard class for creating a nesting level
   ///
   struct NestingContextGuard {
-    NestingContextGuard(ExpressionParser &parser, LabelLevelOpInterface levelOp)
-        : parser{parser} {
-      parser.addNestingContextLevel(levelOp);
+    explicit NestingContextGuard(ValueStack &stack) : stack(stack) {
+      stack.pushFrame();
     }
-    NestingContextGuard(NestingContextGuard &&other) : parser{other.parser} {
-      other.shouldDropOnDestruct = false;
-    }
-    NestingContextGuard(NestingContextGuard const &) = delete;
-    ~NestingContextGuard() {
-      if (shouldDropOnDestruct)
-        parser.dropNestingContextLevel();
-    }
-    ExpressionParser &parser;
-    bool shouldDropOnDestruct = true;
+    NestingContextGuard(const NestingContextGuard &) = delete;
+    ~NestingContextGuard() { stack.popFrame(); }
+    ValueStack &stack;
   };
 
-  void addNestingContextLevel(LabelLevelOpInterface levelOp) {
-    valueStack.addLabelLevel(levelOp);
-  }
+  // Decode dead instructions into temporary blocks in the original region:
+  // enclosing label and function lookups still work, and the decoder appends
+  // all continuations to the same suffix. No live op may refer to that suffix.
+  class DiscardedTail {
+  public:
+    DiscardedTail(ExpressionParser &parser, OpBuilder &builder)
+        : parser(parser), builder(builder) {}
+    DiscardedTail(const DiscardedTail &) = delete;
+    ~DiscardedTail();
 
-  void dropNestingContextLevel() {
-    // Should always succeed as we are droping the frame that was previously
-    // created.
-    valueStack.dropLabelLevel();
-  }
+    void startBlock();
+    bool active() const { return lastLiveBlock != nullptr; }
+
+  private:
+    ExpressionParser &parser;
+    OpBuilder &builder;
+    Block *lastLiveBlock = nullptr;
+    OpBuilder::InsertPoint liveInsertionPoint;
+  };
 
   llvm::FailureOr<FunctionType> getFuncTypeFor(OpBuilder &builder,
                                                EmptyBlockMarker) {
@@ -343,22 +345,19 @@ private:
   struct ParseResultWithInfo {
     SmallVector<Value> opResults;
     std::byte endingByte;
+    InstructionFlow flow;
   };
 
   llvm::FailureOr<FunctionType> parseBlockFuncType(OpBuilder &builder);
 
 public:
-  template <std::byte ParseEndByte = WasmBinaryEncoding::endByte>
-  parsed_values_t parse(OpBuilder &builder, UniqueByte<ParseEndByte> = {});
+  parsed_values_t parse(OpBuilder &builder, TypeRange resultTypes);
 
+private:
   template <std::byte... ExpressionParseEnd>
   FailureOr<ParseResultWithInfo>
-  parse(OpBuilder &builder,
+  parse(OpBuilder &builder, TypeRange resultTypes,
         ByteSequence<ExpressionParseEnd...> parsingEndFilters);
-
-  NestingContextGuard addNesting(LabelLevelOpInterface levelOp) {
-    return NestingContextGuard{*this, levelOp};
-  }
 
   parsed_values_t popOperands(TypeRange operandTypes) {
     return valueStack.popOperands(operandTypes, &currentOpLoc.value());
@@ -380,6 +379,7 @@ public:
     return *currentOpLoc;
   }
 
+public:
   class ExprParserProxy {
   public:
     friend ExpressionParser;
@@ -393,7 +393,6 @@ public:
     llvm::FailureOr<std::byte>
     parseBlockContent(OpBuilder &builder, Block *blockToFill,
                       TypeRange resTypes, Location opLoc,
-                      LabelLevelOpInterface levelOp,
                       FilterT parseEndBytes = {}) {
       OpBuilder::InsertionGuard guard(builder);
       assert(blockToFill && blockToFill->empty() && "expected an empty block");
@@ -401,21 +400,15 @@ public:
       LDBG() << "parsing a block of type "
              << builder.getFunctionType(blockToFill->getArgumentTypes(),
                                         resTypes);
-      auto nestingGuard = exprParser.addNesting(levelOp);
+      NestingContextGuard nestingGuard(exprParser.valueStack);
 
       if (failed(exprParser.pushResults(blockToFill->getArguments())))
         return failure();
-      auto bodyParsingRes = exprParser.parse(builder, parseEndBytes);
+      auto bodyParsingRes = exprParser.parse(builder, resTypes, parseEndBytes);
       if (failed(bodyParsingRes))
         return failure();
-      // Add a fallthrough terminator only if the current block needs one.
-      Block *exitBlock = builder.getBlock();
-      if (!exitBlock->mightHaveTerminator()) {
-        auto returnOperands = exprParser.popOperands(resTypes);
-        if (failed(returnOperands))
-          return failure();
-        BlockReturnOp::create(builder, opLoc, *returnOperands);
-      }
+      if (bodyParsingRes->flow == InstructionFlow::FallsThrough)
+        BlockReturnOp::create(builder, opLoc, bodyParsingRes->opResults);
       LDBG() << "end of parsing of a block";
       return bodyParsingRes->endingByte;
     }
@@ -490,6 +483,8 @@ private:
   WasmModuleSymbolTables const &symbols;
   locals_t locals;
   ValueStack valueStack;
+  // IR discard state is inherited by nested frames; stack polymorphism isn't.
+  unsigned discardDepth = 0;
 };
 
 class ParserHead {
@@ -703,9 +698,10 @@ public:
 
   parsed_values_t parseExpression(OpBuilder &builder,
                                   WasmModuleSymbolTables const &symbols,
+                                  TypeRange resultTypes,
                                   ArrayRef<local_val_t> locals = {}) {
     auto eParser = ExpressionParser{*this, symbols, locals};
-    return eParser.parse(builder);
+    return eParser.parse(builder, resultTypes);
   }
 
   LogicalResult parseCodeFor(FuncOp func,
@@ -752,7 +748,8 @@ public:
         locals.push_back(local.getResult());
       }
     }
-    parsed_values_t res = cParser.parseExpression(builder, symbols, locals);
+    parsed_values_t res =
+        cParser.parseExpression(builder, symbols, func.getResultTypes(), locals);
     if (failed(res))
       return failure();
     if (!cParser.end())
@@ -898,20 +895,20 @@ inline FailureOr<int64_t> ParserHead::parseI64() {
 void ValueStack::dump() const {
   llvm::dbgs() << "================= Wasm ValueStack =======================\n";
   llvm::dbgs() << "size: " << size() << "\n";
-  llvm::dbgs() << "nbFrames: " << labelLevel.size() << '\n';
+  llvm::dbgs() << "nbFrames: " << frames.size() << '\n';
   llvm::dbgs() << "<Top>"
                << "\n";
   // Stack is pushed to via push_back. Therefore the top of the stack is the
   // end of the vector. Iterate in reverse so that the first thing we print
   // is the top of the stack.
   auto indexGetter = [this]() {
-    size_t idx = labelLevel.size();
+    size_t idx = frames.size();
     return [this, idx]() mutable -> std::optional<std::pair<size_t, size_t>> {
       llvm::dbgs() << "IDX: " << idx << '\n';
       if (idx == 0)
         return std::nullopt;
       auto frameId = idx - 1;
-      auto frameLimit = labelLevel[frameId].stackIdx;
+      auto frameLimit = frames[frameId].stackIdx;
       idx -= 1;
       return {{frameId, frameLimit}};
     };
@@ -944,24 +941,31 @@ parsed_values_t ValueStack::popOperands(TypeRange operandTypes,
   LDBG() << "Popping from ValueStack\n"
          << "  Elements(s) to pop: " << operandTypes.size() << "\n"
          << "  Current stack size: " << values.size();
-  if (operandTypes.size() > values.size())
+  Block *placeholderBlock = frames.back().placeholderBlock;
+  if (operandTypes.size() > frameSize() && !placeholderBlock)
     return emitError(*opLoc,
                      "stack doesn't contain enough values. trying to get ")
-           << operandTypes.size() << " operands on a stack containing only "
-           << values.size() << " values";
-  size_t stackIdxOffset = values.size() - operandTypes.size();
-  SmallVector<Value> res{};
-  res.reserve(operandTypes.size());
-  for (size_t i{0}; i < operandTypes.size(); ++i) {
-    Value operand = values[i + stackIdxOffset];
-    Type stackType = operand.getType();
-    if (stackType != operandTypes[i])
+           << operandTypes.size() << " operands in a frame containing only "
+           << frameSize() << " values";
+
+  // Only operands missing at the frame floor are polymorphic. Concrete
+  // values occupy the top of the stack and must match the trailing types.
+  size_t numConcrete = std::min<size_t>(operandTypes.size(), frameSize());
+  size_t numMissing = operandTypes.size() - numConcrete;
+  auto concrete = ArrayRef(values).take_back(numConcrete);
+  for (auto [operand, expected] :
+       llvm::zip_equal(concrete, operandTypes.drop_front(numMissing))) {
+    if (operand.getType() != expected)
       return emitError(*opLoc, "invalid operand type on stack. expecting ")
-             << operandTypes[i] << ", value on stack is of type " << stackType;
+             << expected << ", value on stack is of type " << operand.getType();
     LDBG() << "    POP: " << operand;
-    res.push_back(operand);
   }
-  values.resize(values.size() - operandTypes.size());
+  SmallVector<Value> res;
+  res.reserve(operandTypes.size());
+  for (Type type : operandTypes.take_front(numMissing))
+    res.push_back(placeholderBlock->addArgument(type, *opLoc));
+  llvm::append_range(res, concrete);
+  values.truncate(values.size() - numConcrete);
   LDBG() << "  Updated stack size: " << values.size();
   return res;
 }
@@ -982,35 +986,74 @@ LogicalResult ValueStack::pushResults(ValueRange results, Location *opLoc) {
   return success();
 }
 
-template <std::byte EndParseByte>
+void ExpressionParser::DiscardedTail::startBlock() {
+  Region *region = builder.getInsertionBlock()->getParent();
+  if (!active()) {
+    lastLiveBlock = &region->back();
+    liveInsertionPoint = builder.saveInsertionPoint();
+    ++parser.discardDepth;
+  }
+  assert(region == lastLiveBlock->getParent() && "tail changed regions");
+  parser.valueStack.resetFrame(builder.createBlock(region, region->end()));
+}
+
+ExpressionParser::DiscardedTail::~DiscardedTail() {
+  if (!active())
+    return;
+  parser.valueStack.resetFrame();
+  --parser.discardDepth;
+  builder.restoreInsertionPoint(liveInsertionPoint);
+  // Drop uses in the entire suffix before erasing any of its blocks. The
+  // temporary IR may contain backedges or be incomplete after a parse error.
+  for (Block *block = lastLiveBlock->getNextNode(); block;
+       block = block->getNextNode())
+    block->dropAllReferences();
+  while (Block *block = lastLiveBlock->getNextNode())
+    block->erase();
+}
+
 parsed_values_t ExpressionParser::parse(OpBuilder &builder,
-                                        UniqueByte<EndParseByte> endByte) {
-  auto res = parse(builder, ByteSequence<EndParseByte>{});
+                                       TypeRange resultTypes) {
+  auto res = parse(builder, resultTypes,
+                   ByteSequence<WasmBinaryEncoding::endByte>{});
   if (failed(res))
     return failure();
-  return res->opResults;
+  return std::move(res->opResults);
 }
 
 template <std::byte... ExpressionParseEnd>
 FailureOr<ExpressionParser::ParseResultWithInfo>
-ExpressionParser::parse(OpBuilder &builder,
+ExpressionParser::parse(OpBuilder &builder, TypeRange resultTypes,
                         ByteSequence<ExpressionParseEnd...> parsingEndFilters) {
-  ParsedInstruction last;
+  DiscardedTail tail(*this, builder);
   for (;;) {
     currentOpLoc = parser.getLocation();
     FailureOr<std::byte> opCode = parser.consumeByte();
     if (failed(opCode))
       return failure();
-    if (isValueOneOf(*opCode, parsingEndFilters))
-      return {{std::move(last.results), *opCode}};
-    if (last.flow == InstructionFlow::NoFallthrough)
-      return emitError(*currentOpLoc,
-                       "unreachable instructions are not supported");
+    if (isValueOneOf(*opCode, parsingEndFilters)) {
+      auto results = popOperands(resultTypes);
+      if (failed(results))
+        return failure();
+      if (valueStack.frameSize() != 0)
+        return emitError(*currentOpLoc, "excess operands at end of expression");
+      if (tail.active())
+        return ParseResultWithInfo{{}, *opCode, InstructionFlow::NoFallthrough};
+      return ParseResultWithInfo{std::move(*results), *opCode,
+                                 InstructionFlow::FallsThrough};
+    }
+    // Recognize the trap only when its IR would itself be discarded. Live
+    // `unreachable` still requires a separate lowering to a real trap.
+    if (*opCode == WasmBinaryEncoding::OpCode::unreachable && discardDepth) {
+      tail.startBlock();
+      continue;
+    }
     parsed_inst_t parsed = dispatchToInstParser(*opCode, builder);
     if (failed(parsed))
       return failure();
-    last = std::move(*parsed);
-    if (failed(pushResults(last.results)))
+    if (parsed->flow == InstructionFlow::NoFallthrough)
+      tail.startBlock();
+    else if (failed(pushResults(parsed->results)))
       return failure();
   }
 }
@@ -1044,7 +1087,7 @@ ExpressionParser::ExprParserProxy::parseBlockLikeOp(OpBuilder &builder) {
   auto blockOp =
       OpToCreate::create(builder, getCurrentOpLoc(), *inputOps, successor);
   auto *blockBody = blockOp.createBlock();
-  if (failed(parseBlockContent(builder, blockBody, resTypes, opLoc, blockOp)))
+  if (failed(parseBlockContent(builder, blockBody, resTypes, opLoc)))
     return failure();
   builder.setInsertionPointToStart(successor);
   return ParsedInstruction{SmallVector<Value>(successor->getArguments())};
@@ -1094,16 +1137,18 @@ parsed_inst_t parse(OpCode<WasmBinaryEncoding::OpCode::ifOpCode>,
       ByteSequence<WasmBinaryEncoding::endByte,
                    WasmBinaryEncoding::OpCode::elseOpCode>{};
   auto parseIfRes = exprParser.parseBlockContent(
-      builder, ifEntryBlock, resTypes, opLoc, ifOp, ifElseFilter);
+      builder, ifEntryBlock, resTypes, opLoc, ifElseFilter);
   if (failed(parseIfRes))
     return failure();
   if (*parseIfRes == WasmBinaryEncoding::OpCode::elseOpCode) {
     LDBG() << "  else block is present.";
     Block *elseEntryBlock = ifOp.createElseBlock();
-    auto parseElseRes = exprParser.parseBlockContent(builder, elseEntryBlock,
-                                                     resTypes, opLoc, ifOp);
+    auto parseElseRes =
+        exprParser.parseBlockContent(builder, elseEntryBlock, resTypes, opLoc);
     if (failed(parseElseRes))
       return failure();
+  } else if (inputTypes != resTypes) {
+    return emitError(opLoc, "implicit else must match the if result types");
   }
   builder.setInsertionPointToStart(successor);
   return ParsedInstruction{SmallVector<Value>(successor->getArguments())};
@@ -1246,11 +1291,6 @@ parsed_inst_t ExpressionParser::parseSetOrTee(OpBuilder &builder) {
   if (*id >= locals.size())
     return emitError(*currentOpLoc, "invalid local index. function has ")
            << locals.size() << " accessible locals, received index " << *id;
-  if (valueStack.empty())
-    return emitError(
-        *currentOpLoc,
-        "invalid stack access, trying to access a value on an empty stack");
-
   parsed_values_t poppedOp =
       popOperands(locals[*id].getType().getElementType());
   if (failed(poppedOp))
@@ -2171,15 +2211,9 @@ WasmBinaryParser::parseSectionItem<WasmSectionType::GLOBAL>(ParserHead &ph,
   OpBuilder::InsertionGuard guard{builder};
   Block *block = builder.createBlock(&globalOp.getInitializer());
   builder.setInsertionPointToStart(block);
-  parsed_values_t expr = ph.parseExpression(builder, symbols);
+  parsed_values_t expr = ph.parseExpression(builder, symbols, globalType.type);
   if (failed(expr))
     return failure();
-  if (block->empty())
-    return emitError(globalLocation, "global with empty initializer");
-  if (expr->size() != 1 && (*expr)[0].getType() != globalType.type)
-    return emitError(
-        globalLocation,
-        "initializer result type does not match global declaration type");
   ReturnOp::create(builder, globalLocation, *expr);
   return success();
 }

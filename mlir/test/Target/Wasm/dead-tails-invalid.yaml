@@ -1,0 +1,131 @@
+# Dead tails still check concrete types, stack height, and label depth.
+# RUN: split-file %s %t
+# RUN: yaml2obj %t/operand.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=TYPE
+# RUN: yaml2obj %t/result.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=TYPE
+# RUN: yaml2obj %t/excess.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=EXCESS
+# RUN: yaml2obj %t/nested.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=MISSING
+# RUN: yaml2obj %t/live-floor.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=MISSING
+# RUN: yaml2obj %t/else.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=MISSING
+# RUN: yaml2obj %t/depth.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=DEPTH
+# RUN: yaml2obj %t/live-unreachable.yaml -o - | not mlir-translate --import-wasm 2>&1 | FileCheck %s --check-prefix=TRAP
+
+# TYPE: error: invalid operand type on stack. expecting 'i32', value on stack is of type 'i64'
+# EXCESS: error: excess operands at end of expression
+# MISSING: error: stack doesn't contain enough values. trying to get 1 operands in a frame containing only 0 values
+# DEPTH: error: invalid branch label depth: 1
+# TRAP: error: unknown instruction opcode: 0
+
+#--- operand.yaml
+# (func (result i32) i32.const 42 return i64.const 0 i32.add)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32]}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 412A0F42006A0B}
+
+#--- result.yaml
+# (func (result i32) i32.const 42 br 0 i64.const 0)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32]}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 412A0C0042000B}
+
+#--- excess.yaml
+# (func return i32.const 0)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: []}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 0F41000B}
+
+#--- nested.yaml
+# (func (result i32) i32.const 42 return i32.const 0 block br 1 end)
+# The nested frame neither inherits polymorphism nor sees the outer i32.
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32]}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 412A0F410002400C010B0B}
+
+#--- live-floor.yaml
+# (func (result i32) i32.const 0 block br 1 end)
+# The same frame floor also bounds operand pops in live code.
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32]}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 410002400C010B0B}
+
+#--- else.yaml
+# (func (result i32) i32.const 1 if (result i32) i32.const 42 return else end)
+# `else` starts a fresh frame, whether or not the `then` arm fell through.
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: [I32]}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 4101047F412A0F050B0B}
+
+#--- depth.yaml
+# (func br 0 br 1)
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: []}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 0C000C010B}
+
+#--- live-unreachable.yaml
+# (func unreachable) is valid Wasm but still not supported by this importer.
+--- !WASM
+FileHeader: {Version: 0x1}
+Sections:
+  - Type: TYPE
+    Signatures:
+      - {Index: 0, ParamTypes: [], ReturnTypes: []}
+  - Type: FUNCTION
+    FunctionTypes: [0]
+  - Type: CODE
+    Functions:
+      - {Index: 0, Locals: [], Body: 000B}

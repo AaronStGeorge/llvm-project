@@ -1,0 +1,44 @@
+# Dead tails after return and br, including temporary nested CFG and else arms.
+--- !WASM
+FileHeader:
+  Version: 0x1
+Sections:
+  - Type: TYPE
+    Signatures:
+      - Index: 0
+        ParamTypes: []
+        ReturnTypes: [I32]
+      - Index: 1
+        ParamTypes: [I32]
+        ReturnTypes: [I32]
+  - Type: FUNCTION
+    FunctionTypes: [0, 1, 1]
+  - Type: EXPORT
+    Exports:
+      - Name: return_tail
+        Kind: FUNCTION
+        Index: 0
+      - Name: branch_tail
+        Kind: FUNCTION
+        Index: 1
+      - Name: else_is_live
+        Kind: FUNCTION
+        Index: 2
+  - Type: CODE
+    Functions:
+      - Index: 0
+        Locals: []
+        # i32.const 42; return; i32.add; end
+        Body: 412A0F6A0B
+      - Index: 1
+        Locals: []
+        # block i32; i32.const 23; br 0
+        # br_if 0; i64.const 1; unreachable; local.set 0
+        # block i32; local.get 0; unreachable; br 1; end
+        # i64.const 2; i32.const 99; return; i32.const 3; i32.add; end; end
+        Body: 027F41170C000D004201002100027F2000000C010B420241E3000F41036A0B0B
+      - Index: 2
+        Locals: []
+        # local.get 0; if i32; i32.const 11; br 0; i32.add
+        # else; i32.const 12; end; end
+        Body: 2000047F410B0C006A05410C0B0B

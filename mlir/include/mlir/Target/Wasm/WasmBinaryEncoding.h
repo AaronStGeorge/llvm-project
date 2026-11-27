@@ -20,6 +20,7 @@ struct WasmBinaryEncoding {
   /// Byte encodings for Wasm instructions.
   struct OpCode {
     // Control instructions.
+    static constexpr std::byte unreachable{0x00};
     static constexpr std::byte block{0x02};
     static constexpr std::byte loop{0x03};
     static constexpr std::byte ifOpCode{0x04};
